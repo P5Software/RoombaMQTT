@@ -6,7 +6,7 @@
  *      /manage/[Device Name]/[Operation]
  *  
  *    Device Status Responses:
- *      /client/[Device Name]
+ *      /client/[Device Name]/[Response]
  *      
  *    Note, MAC addresses have no spaces, dashes, or colons.  MAC AA:BB:CC:DD:EE:00 = AABBCCDDEE00.
  *    
@@ -25,7 +25,7 @@
 #include <ESP8266httpUpdate.h>
 #include <ESP8266mDNS.h>
 #include <ESP8266HTTPUpdateServer.h>
-#include "Roomba.h" //http://www.airspayce.com/mikem/arduino/Roomba/Roomba-1.4.zip
+#include <Roomba.h> //http://www.airspayce.com/mikem/arduino/Roomba/Roomba-1.4.zip
 
 
 const int firmwareVersion = 9;
@@ -48,16 +48,38 @@ typedef struct structSettings{
     String sensorTopic;
    } mqttServer;
 
-  struct{
-    String url;
-  } firmwareServer;
+  struct {
+    String serverURL;
+    unsigned long updateFrequency;
+  } firmware;
+
+  struct {
+     unsigned long updateFrequency;
+     double reportBatteryVoltageChange;
+     double reportBatteryCurrentChange;
+     double reportBatteryTemperatureChange;
+     double reportBatteryChargeChange;
+     int reportBateryPercentRemainingChange;  
+  } sensors;
+
+  struct {
+     unsigned long updateFrequency;
+  } health;
+
+  
 
 };
 
 
-typedef struct structSensorReadings{
+typedef struct structRoombaData{
   
   int interfaceMode;
+
+  struct {
+    unsigned long startTime;
+    unsigned long endTime;
+    unsigned long runTime;
+  } cleaningCycle;
  
   struct {
     unsigned long lastRetrieved;
@@ -72,7 +94,8 @@ typedef struct structSensorReadings{
 
   struct {
     unsigned long lastRetrieved;
-    int distance;    
+    long priorDistance;
+    long odometer;
   } distance;
 
   struct {
@@ -110,9 +133,9 @@ typedef struct structSensorReadings{
 
 const int EEPROMLength = 512;
 const int EEPROMDataBegin = 10; //Reserving the first 10 addresses for provision statuses
-const unsigned long healthUpdateEveryMilliseconds = 1680000; //Every 28 minutes
-const unsigned long firmwareUpdateEveryMilliseconds = 3600000; //Every sixty minutes
-const unsigned long minimumSensorReadingDwellMilliseconds = 1000; //Every second
+//const unsigned long healthUpdateEveryMilliseconds = 1680000; //Every 28 minutes
+//const unsigned long firmwareUpdateEveryMilliseconds = 3600000; //Every sixty minutes
+//const unsigned long minimumSensorReadingDwellMilliseconds = 1000; //Every second
 unsigned long previousHealthHandledTime = 0;
 unsigned long previousFirmwareHandledTime = 0;
 struct structSettings settings;
@@ -331,7 +354,7 @@ void attemptProvision(String SSID, String wpaKey, String bootstrapURL){
   //Print output while waiting for WiFi to connect
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
-    Serial.print(".");
+    //Serial.print(".");
 
     //Set a timer for 30 seconds to connect
     if(millis() - timeStartConnect > 30000){
@@ -351,7 +374,7 @@ void attemptProvision(String SSID, String wpaKey, String bootstrapURL){
     }
   }
 
-  Serial.print("connected.");
+  //Serial.print("connected.");
   broadcastLine("");
   broadcastLine("IP address: " + WiFi.localIP().toString() + "\nMAC Address: " + WiFi.macAddress() + "\n");
 
@@ -572,6 +595,23 @@ void handleMQTTManagementMessage(String topic, String payload){
     return;
   }
 
+
+  //See if the payload requests roomba to set its time
+  if(topic == settings.mqttServer.manageTopic + "/setTime"){
+
+    commandRoombaSetDayTime(payloadToLowerCase);
+
+    return;
+  }
+
+  //See if the payload requests roomba to reset its schedule
+  if(topic == settings.mqttServer.manageTopic + "/resetSchedule"){
+
+    commandRoombaResetSchedule();
+
+    return;
+  }
+
 }
 
 
@@ -720,6 +760,9 @@ void handleHealth(){
   //Publish the device name
   publishMQTT(settings.mqttServer.clientTopic + "/deviceName", settings.deviceName);
 
+  //Retrieve the battery info
+  //getBatteryInfo();
+
   //Publish Roomba's Charge State
   publishMQTT(settings.mqttServer.clientTopic + "/chargingState", sensorReadings.battery.chargingState);
 
@@ -743,7 +786,11 @@ void handleHealth(){
 
 }
 
+
 void getBatteryInfo(){
+
+  return;
+
 
   //Make sure we are respecting the minimumSensorReadingDwellMilliseconds
   if((unsigned long)(millis() - sensorReadings.battery.lastRetrieved) < (unsigned long)minimumSensorReadingDwellMilliseconds){
@@ -806,31 +853,117 @@ void getBatteryInfo(){
 
   //Get the percent remaining
   sensorReadings.battery.percentRemaining = (float)(sensorReadings.battery.charge / sensorReadings.battery.capacity)*100;
+
+  sensorReadings.battery.lastRetrieved = millis();
   
 }
 
+
 void commandRoombaClean(){
-  broadcastLine("Roomba will now clean");
+  
+  broadcastLine("Commanding Roomba to Clean");
+
+  //Send the command to Roomba
+  Serial.write(135);
+  delay(50);
+
 }
 
 
 void commandRoombaDock(){
-  broadcastLine("Roomba will now return to dock");  
+  
+  broadcastLine("Commanding Roomba to Return to Dock");
+
+  //Send the command to Roomba
+  Serial.write(143);
+  delay(50);
+  
 }
 
 
 void commandRoombaStop(){
-  broadcastLine("Roomba will now return to stop");
+
+  broadcastLine("Commanding Roomba to Stop");
+
+  //Send the command to Roomba
+  Serial.write(133);
+  delay(50);
+  
 }
 
 
-void commandRoombaClearSchedule(){
-  broadcastLine("Roomba will now clear schedule");
+void commandRoombaResetSchedule(){
+  
+  broadcastLine("Resetting Roomba's Schedule to Never Clean");
+
+  //Send the commands to Roomba
+  Serial.write(167);
+  delay(50);
+
+  //Send value 0, 15 times
+  for(int i = 0; i < 15; i++){
+    Serial.write(0);
+    delay(50);
+  }
 }
 
 
-void commandRoombaGetDayTime(){
-  broadcastLine("Roomba will now get day and time");
+void commandRoombaSetDayTime(String roombaTimeFormattedTime){
+  
+  //Requires time in "WEEKDAYNAME,hh:mm" format, inclusive of leading zero's
+
+  //Force the input string to lowercase
+  roombaTimeFormattedTime.toLowerCase();
+  
+  String dayCode = "0";
+  String weekdayName = roombaTimeFormattedTime.substring(0,roombaTimeFormattedTime.indexOf(","));
+  String hour = roombaTimeFormattedTime.substring(roombaTimeFormattedTime.indexOf(",") + 1,roombaTimeFormattedTime.indexOf(":"));
+  String minute = roombaTimeFormattedTime.substring(roombaTimeFormattedTime.indexOf(":") + 1, roombaTimeFormattedTime.indexOf(":") + 3);
+
+  weekdayName.trim();
+  hour.trim();
+  minute.trim();
+
+  if(weekdayName == "sunday") {
+    dayCode = "0";
+  }
+
+  if(weekdayName == "monday") {
+    dayCode = "1";
+  }
+
+  if(weekdayName == "tuesday") {
+    dayCode = "2";
+  }
+
+  if(weekdayName == "wednesday") {
+    dayCode = "3";
+  }
+
+  if(weekdayName == "thursday") {
+    dayCode = "4";
+  }
+
+  if(weekdayName == "friday") {
+    dayCode = "5";
+  }
+
+  if(weekdayName == "saturday") {
+    dayCode = "6";
+  }
+
+  broadcastLine("Setting Roomba's Time to " + weekdayName + " [" + dayCode + "] Hour: [" + hour + "] Minute: [" + minute + "]");
+
+  //Send the commands to Roomba
+  Serial.write(168);
+  delay(50);
+  Serial.write(dayCode.c_str());
+  delay(50);
+  Serial.write(hour.c_str());
+  delay(50);
+  Serial.write(minute.c_str());
+  delay(50);
+
 }
 
 
