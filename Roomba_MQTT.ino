@@ -31,7 +31,7 @@
 #include <Math.h>
 
 
-const int firmwareVersion = 27;
+const int firmwareVersion = 53;
 
 
 typedef struct structSettings{
@@ -83,11 +83,11 @@ typedef struct structRoombaData{
  
   struct {
     unsigned long lastRetrieved;
-    int voltage;
-    int current;
+    uint16_t voltage;
+    int16_t current;
     int temperature;
-    int charge;
-    int capacity;
+    uint16_t charge;
+    uint16_t capacity;
     String chargingState;
     String percentRemaining;
   } battery;
@@ -135,7 +135,6 @@ const int EEPROMLength = 512;
 const int EEPROMDataBegin = 10; //Reserving the first 10 addresses for provision statuses
 struct structSettings settings;
 struct structRoombaData roombaData;
-//Roomba roomba(&Serial, Roomba::Baud115200);
 WiFiClient espClient;
 ESP8266WebServer webServer(80);
 ESP8266HTTPUpdateServer httpUpdater;
@@ -173,6 +172,7 @@ void setup() {
   settings.health.updateFrequency = 1680000; //Every 28 minutes
   settings.firmware.updateFrequency = 3600000; //Every sixty minutes
   settings.sensors.updateFrequency = 1000; //Every second
+
 
   //Check the provisioning status
   checkDeviceProvisioned();
@@ -213,7 +213,7 @@ void setup() {
     //Configure the mqtt Client
     mqttClient.setServer(settings.mqttServer.serverName.c_str(), settings.mqttServer.port);
     mqttClient.setCallback(mqttCallback);
-    
+
   }
 
 }
@@ -271,6 +271,8 @@ void loop() {
 
     //Handle firmware updates if enough time has passed
     if((unsigned long)(millis() - settings.firmware.lastRetrieved) > (unsigned long)settings.firmware.updateFrequency){
+      
+      broadcastLine("Checking firmware");
 
       checkFirmwareUpgrade();
 
@@ -750,10 +752,9 @@ void readEEPROMToRAM(){
 void broadcastLine(String data){
 
   /*
-   * Prints the data input on the serial console and also on the telnet client.
+   * Prints the data input on the telnet client.
    */
 
-  //Serial.println(data);
   telnetClient.print(data);
   
 }
@@ -772,6 +773,8 @@ String padRight(String data, int toLength, String padValue){
 
 void handleHealth(){
 
+  broadcastLine("void handleHealth()");
+
   //Publish the uptime
   publishMQTT(settings.mqttServer.clientTopic + "/uptime", String(millis()));
 
@@ -787,43 +790,44 @@ void handleHealth(){
   //Retrieve the battery info if Roomba isn't sleeping
   //if(roombaData.currentStatus != SLEEPING){
     
-    getBatteryInfo();
-  
-    //Publish Roomba's Charge State
-    publishMQTT(settings.mqttServer.sensorTopic + "/chargingState", roombaData.battery.chargingState);
-  
-    //Publish Roomba's Battery Voltage
-    publishMQTT(settings.mqttServer.sensorTopic + "/batteryVoltage", (String)roombaData.battery.voltage);
-  
-    //Publish Roomba's Battery Temperature
-    publishMQTT(settings.mqttServer.sensorTopic + "/batteryTemperature", (String)roombaData.battery.temperature);
-  
-    //Publish Roomba's Battery Capacity
-    publishMQTT(settings.mqttServer.sensorTopic + "/batteryCapacity", (String)roombaData.battery.capacity);
-  
-    //Publish Roomba's Battery Charge
-    publishMQTT(settings.mqttServer.sensorTopic + "/batteryCharge", (String)roombaData.battery.charge);
-  
-    //Publish Roomba's Battery Percentage
-    publishMQTT(settings.mqttServer.sensorTopic + "/batteryPercentage", (String)roombaData.battery.percentRemaining);
-  
-    //Publish Roomba's Battery Current
-    publishMQTT(settings.mqttServer.sensorTopic + "/batteryCurrent", (String)roombaData.battery.current);
+  getBatteryInfo();
 
- // }
+  //Publish Roomba's Charge State
+  publishMQTT(settings.mqttServer.sensorTopic + "/chargingState", roombaData.battery.chargingState);
+
+  //Publish Roomba's Battery Voltage
+  publishMQTT(settings.mqttServer.sensorTopic + "/batteryVoltage", (String)roombaData.battery.voltage);
+
+  //Publish Roomba's Battery Temperature
+  publishMQTT(settings.mqttServer.sensorTopic + "/batteryTemperature", (String)roombaData.battery.temperature);
+
+  //Publish Roomba's Battery Capacity
+  publishMQTT(settings.mqttServer.sensorTopic + "/batteryCapacity", (String)roombaData.battery.capacity);
+
+  //Publish Roomba's Battery Charge
+  publishMQTT(settings.mqttServer.sensorTopic + "/batteryCharge", (String)roombaData.battery.charge);
+
+  //Publish Roomba's Battery Percentage
+  publishMQTT(settings.mqttServer.sensorTopic + "/batteryPercentage", (String)roombaData.battery.percentRemaining);
+
+  //Publish Roomba's Battery Current
+  publishMQTT(settings.mqttServer.sensorTopic + "/batteryCurrent", (String)roombaData.battery.current);
 
 }
 
 
 void getBatteryInfo(){
+    broadcastLine("void getBatteryInfo()");
 
   //Make sure we are respecting the minimum battery sensor read rate
- /* if((unsigned long)(millis() - roombaData.battery.lastRetrieved) < (unsigned long)settings.sensors.updateFrequency){
+  if((unsigned long)(millis() - roombaData.battery.lastRetrieved) < (unsigned long)settings.sensors.updateFrequency){
+
+    broadcastLine("Ignoring getBatteryInfo; Abusive.\n");
 
     //Not enough milliseconds have elapsed
     return;
 
-  }*/
+  }
 
   broadcastLine("Attempting to read Roomba's battery.\n");
 
@@ -876,47 +880,24 @@ void getBatteryInfo(){
   }
   
   //Get the voltage (1, 2)
-  roombaData.battery.voltage = (tmpBuffer[2] + 256*tmpBuffer[1]);
+  roombaData.battery.voltage = combineBytesToInt((uint8_t)tmpBuffer[1], (uint8_t)tmpBuffer[2]);
 
   //Get the current (3,2)
-  roombaData.battery.current = (tmpBuffer[4] + 256*tmpBuffer[3]);
+  roombaData.battery.current = combineBytesToInt(tmpBuffer[3], tmpBuffer[4]);
+
+  broadcastLine("tmpBuffer[3]: [" + (String)tmpBuffer[3] + "] tmpBuffer[4]: [" + (String)tmpBuffer[4] + "]\n");
 
   //Get the temperature (5, 1)
   roombaData.battery.temperature = tmpBuffer[5];
 
   //Get the charge (6, 2)
-  roombaData.battery.charge = (tmpBuffer[7] + 256*tmpBuffer[6]);
+  roombaData.battery.charge = combineBytesToInt((uint8_t)tmpBuffer[6], (uint8_t)tmpBuffer[7]);
 
   //Get the capacity (8, 2)
-  roombaData.battery.capacity = (tmpBuffer[9] + 256*tmpBuffer[8]);
+  roombaData.battery.capacity = combineBytesToInt((uint8_t)tmpBuffer[8], (uint8_t)tmpBuffer[9]);
 
   //Get the percent remaining
   roombaData.battery.percentRemaining = round(((float)roombaData.battery.charge / (float)roombaData.battery.capacity) * 100);
-
- /* //Ensure the data is valid.  When Roomba is sleeping it can return incorrect data
-  if(roombaData.battery.voltage < 0 || roombaData.battery.voltage > 65535){
-    roombaData.battery.voltage = 0;
-  }
-
-  if(roombaData.battery.current < -32768 || roombaData.battery.current > 32767){
-    roombaData.battery.current = 0;
-  }
-
-  if(roombaData.battery.temperature < -128 || roombaData.battery.temperature > 127){
-    roombaData.battery.temperature = 0;
-  }
-
-  if(roombaData.battery.charge < 0 || roombaData.battery.charge > 65535){
-    roombaData.battery.charge = 0;
-  }
-
-  if(roombaData.battery.capacity < 0 || roombaData.battery.capacity > 65535){
-    roombaData.battery.capacity = 0;
-  }
-
-  if(roombaData.battery.percentRemaining.toInt() < 1 || (int)roombaData.battery.percentRemaining.toInt() > 100){
-    roombaData.battery.percentRemaining = "0";
-  }*/
 
   //Set the last retrieved time
   roombaData.battery.lastRetrieved = millis();
@@ -925,6 +906,7 @@ void getBatteryInfo(){
 
 
 void commandRoombaClean(){
+      broadcastLine("void commandRoombaClean()");
 
   //Ensure Roomba is awake
   commandRoombaWake();
@@ -946,6 +928,7 @@ void commandRoombaClean(){
 
 
 void commandRoombaDock(){
+        broadcastLine("void commandRoombaDock()");
 
   //Ensure Roomba is awake
   commandRoombaWake();
@@ -964,7 +947,7 @@ void commandRoombaDock(){
 
 
 void commandRoombaStop(){
-
+        broadcastLine("void commandRoombaStop()");
   broadcastLine("Commanding Roomba to Stop\n");
 
   //Send the command to Roomba
@@ -982,7 +965,7 @@ void commandRoombaStop(){
 
 
 void commandRoombaResetSchedule(){
-  
+  broadcastLine("void commandRoombaResetSchedule()");
   broadcastLine("Resetting Roomba's Schedule to Never Clean\n");
 
   //Send the commands to Roomba
@@ -1003,7 +986,7 @@ void commandRoombaResetSchedule(){
 
 
 void commandRoombaSetDayTime(String roombaTimeFormattedTime){
-  
+    broadcastLine("void commandRoombaSetDayTime(String roombaTimeFormattedTime)");
   //Requires time in "WEEKDAYNAME,hh:mm" format, inclusive of leading zero's
 
   //Force the input string to lowercase
@@ -1083,7 +1066,7 @@ void commandRoombaSetDayTime(String roombaTimeFormattedTime){
 
 
 void commandRoombaReboot(){
-
+    broadcastLine("void commandRoombaReboot()");
   broadcastLine("Rebooting Roomba.\n");
   
   Serial1.write(128);
@@ -1100,6 +1083,12 @@ void commandRoombaReboot(){
 
 
 void commandRoombaWake(){
+broadcastLine("void commandRoombaWake()");
+  //debug
+  roombaData.currentStatus = IDLING;
+
+  return;
+
 
   //Only attempt to wake Roomba when it is sleeping
   if(roombaData.currentStatus != SLEEPING){
@@ -1163,6 +1152,7 @@ void wwwHandleRoot(){
 }
 
 
+
 void wwwHandleSubmit(){
 
   //See if we're trying to submit for the provisioning page
@@ -1200,6 +1190,28 @@ void wwwHandleSubmit(){
   webServer.sendHeader("Access-Control-Allow-Origin", "*");
   webServer.send(400, "text/plain", "Unknown Request\r\n");
     
+}
+
+
+int combineBytesToInt(int byteHigh, int byteLow){
+
+  int16_t returnValue = 0;
+  int tmpByteHigh = 0;
+  int tmpByteLow = 0;
+
+  //Store the temporary values and left-justify them
+  tmpByteHigh = byteHigh << 8;
+  tmpByteLow = byteLow >> 8;
+
+  //Store the combined result
+  returnValue = tmpByteHigh;
+
+  //Pad the last 8 bytes
+  returnValue |= tmpByteLow;
+
+  //Return the new value
+  return returnValue;  
+  
 }
   
 
