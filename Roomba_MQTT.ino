@@ -4,21 +4,60 @@
  *  MQTT Topics:
  *    Device Management Requests:
  *      /manage/[Device Name]/[Operation]
- *  
+ * 
+ *      Supported management topic operations:
+ *        status (commands controller to send a health status)
+ *        restart (commands controller to reboot, requires "request" as payload)
+ *        firmwareUpdate (commands controller to check for a firmware update)
+ *        bootstrap (commands controller to use an alternate bootstrap, erasing current EEPROM and replacing with the URL provided, requires "request" as payload)
+ *        provisionReset (commands controller to erase EEPROM and wait for manual provisioning, requires "request" in payload)
+ *        clean (commands Roomba to perform a normal cleaning routine or temporarily stops an existing cleaning in progress)
+ *        stop (commands Roomba to shutdown and sleep immediately)
+ *        dock (commands Roomba to seek the dock)
+ *        setTime (commands Roomba to set its time in particular format)
+ *        resetSchedule (commands Roomba to delete its internal schedule)
+ *        rebootRoomba (commands Roomba to reboot, essentially a battery removal)
+ *        wake (commands Roomba to wake when the processor has gone to sleep, which is unnecessary when docked)
+ *        
  *    Device Status Responses:
  *      /client/[Device Name]/[Response]
+ *
+ *      Supported client topic responses:
+ *        status (conditions on the controller)
+ *        firmware (controller firmware version)
+ *        uptime (controller uptime in ms)
+ *        ip (controller IP address)
+ *        deviceName (controller device name)
+ *
+ *    Sensor Reading Responses:
+ *      /sensor/[Device Name]/[Sensor Name]
  *      
- *    Note, MAC addresses have no spaces, dashes, or colons.  MAC AA:BB:CC:DD:EE:00 = AABBCCDDEE00.
- *    
- *    Inspired by https://github.com/thehookup/MQTT-Roomba-ESP01.
+ *      Supported sensor topic responses:
+ *        chargingState (battery charging state, as string [NOT_CHARGING, CHARGING_RECONDITIONING, CHARGING_FULL, CHARGING_TRICKLE, WAITING, FAULT, UNKNOWN]
+ *        batteryVoltage (battery voltage in mV)
+ *        batteryTemperature (battery temperature in degrees celcius)
+ *        batteryCapacity (battery capacity in mAh)
+ *        batteryCharge (battery charge in mAh)
+ *        batteryPercentage (percent of the battery remaining as an integer)
+ *        batteryCurrent (battery current charge/draw in mA)
+ *        runStatus (Roomba's current running mode, as string [SLEEPING, CLEANING, IDLING])
+ *        runTime (amount of time the last cleaing mode ran, in ms)
+ *        odometer (distance Roomba traveled in last cleaning mode, in mm)
+ *        dirtiness (average dirtiness reported by Roomba during last cleaning mode, as integer)
  * 
- * (C) 2019, P5 SOftware, LLC.
+ *    Device Name is the MAC address with no spaces, dashes, or colons.  MAC AA:BB:CC:DD:EE:00 = AABBCCDDEE00.
+ *    
+ *    Inspired by https://github.com/thehookup/MQTT-Roomba-ESP01.  Go subscribe.
+ * 
+ * (C) 2019, P5 Software, LLC.
  */
 
-#define SLEEPING 0
-#define CLEANING 1
-#define IDLING 2
- 
+
+#define SLEEPING 0 //Roomba will not respond unless manual intervention or the wake pin is activated; Off dock and processor in low power;
+#define CLEANING 1 //Roomba is actively cleaning
+#define IDLING 2 //Roomba will respond if sent data; Off dock but not sleeping; On dock;
+
+
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <PubSubClient.h>
@@ -31,7 +70,7 @@
 #include <Math.h>
 
 
-const int firmwareVersion = 53;
+const int firmwareVersion = 5;
 
 
 typedef struct structSettings{
@@ -67,13 +106,23 @@ typedef struct structSettings{
      unsigned long lastRetrieved;
   } health;
 
+  struct {
+    int voltage;
+    int current;
+    int temperature;
+    int charge;
+    int percentRemaining;
+  } minimumReportingDelta;
+
 };
 
 
 typedef struct structRoombaData{
   
-  int interfaceMode;
-  int currentStatus;
+  int runStatus;
+  unsigned long odometer;
+  unsigned int dirtiness[256];
+  int stasis;
 
   struct {
     unsigned long startTime;
@@ -82,7 +131,6 @@ typedef struct structRoombaData{
   } cleaningCycle;
  
   struct {
-    unsigned long lastRetrieved;
     uint16_t voltage;
     int16_t current;
     int temperature;
@@ -93,48 +141,29 @@ typedef struct structRoombaData{
   } battery;
 
   struct {
-    unsigned long lastRetrieved;
-    long priorDistance;
-    long odometer;
-  } distance;
+    uint16_t leftWheel;
+    uint16_t rightWheel;
+    uint16_t mainBrush;
+    uint16_t sideBrush;
+  } motorCurrent;
 
   struct {
-    unsigned long lastRetrieved;
-    int dirtiness;
-  } dirt;
-
-  struct {
-    unsigned long lastRetrieved;
-    int degrees;    
-  } angle;
-
-  struct {
-    unsigned long lastRetrieved;
-    int current;
-  } leftWheelMotor;
-    
-  struct {
-    unsigned long lastRetrieved;
-    int current;
-  } rightWheelMotor;
-  
-  struct {
-    unsigned long lastRetrieved;
-    int current;
-  } mainBrushMotor;
-
-  struct {
-    unsigned long lastRetrieved;
-    int current;
-  } sideBrushMotor;
+    uint16_t leftEncoder;
+    uint16_t rightEncoder;
+  } wheels;
  
 };
-  
+
+
 const int wakePin = D3;
 const int EEPROMLength = 512;
 const int EEPROMDataBegin = 10; //Reserving the first 10 addresses for provision statuses
+const int wheelRadius = 69; //mm, measured tire
+const float wheelEncodersPerRevolution = 508.8; //Provided by iRobot
+const float pi = 3.14159265359;
 struct structSettings settings;
-struct structRoombaData roombaData;
+struct structRoombaData roombaDataObserved;
+struct structRoombaData roombaDataReported;
 WiFiClient espClient;
 ESP8266WebServer webServer(80);
 ESP8266HTTPUpdateServer httpUpdater;
@@ -146,15 +175,18 @@ WiFiClient tmpTelnetClient;
 
 void setup() {
   
+  //Use different UARTS.  TX is required to be on UART 1, RX on UART 0
   Serial.begin(115200);
   Serial1.begin(115200);
 
+  //Set the wakeup pin for output
   pinMode(wakePin, OUTPUT);
 
-  delay(2000);
+  //Give the WiFi chip time to start
+  delay(1000);
 
   broadcastLine("\n");
-  broadcastLine(padRight("", 23, ">") + " System Restarted " + padRight("", 23, "<") + "\n");
+  broadcastLine(padRight("", 23, ">") + " System Restarted " + padRight("", 23, "<"));
 
   //Get the MAC address
   settings.machineMacAddress = WiFi.macAddress();
@@ -166,14 +198,18 @@ void setup() {
 
   //Set the hostname
   WiFi.hostname("Roomba-" + settings.deviceName);  
-  broadcastLine("Hostname is " +  WiFi.hostname() + "\n");
+  broadcastLine("Hostname is " +  WiFi.hostname());
 
   //Configure the settings
   settings.health.updateFrequency = 1680000; //Every 28 minutes
   settings.firmware.updateFrequency = 3600000; //Every sixty minutes
-  settings.sensors.updateFrequency = 1000; //Every second
-
-
+  settings.sensors.updateFrequency = 2000; //Every two seconds
+  settings.minimumReportingDelta.voltage = 200; //200mv
+  settings.minimumReportingDelta.current = 512; //512mA
+  settings.minimumReportingDelta.temperature = 2; //2 degrees Celcius
+  settings.minimumReportingDelta.charge = 50; //50mAh
+  settings.minimumReportingDelta.percentRemaining = 1; //One percent
+  
   //Check the provisioning status
   checkDeviceProvisioned();
   
@@ -197,7 +233,7 @@ void setup() {
   
     WiFi.begin(settings.ssidName.c_str(), settings.wpaKey.c_str());
   
-    broadcastLine("Attempting to connect to network " + settings.ssidName + "\n"); 
+    broadcastLine("Attempting to connect to network " + settings.ssidName); 
     
     //Print output while waiting for WiFi to connect
     while (WiFi.status() != WL_CONNECTED) {
@@ -205,7 +241,7 @@ void setup() {
     }
 
     //Connected, begin sending to the broadcastLin function
-    broadcastLine("IP address: " + WiFi.localIP().toString() + "\nMAC Address: " + WiFi.macAddress() + "\n");
+    broadcastLine("IP address: " + WiFi.localIP().toString() + "\nMAC Address: " + WiFi.macAddress());
 
     //Start the telent server
     telnetServer.begin();
@@ -252,7 +288,7 @@ void loop() {
    //Handle health updates if enough time has passed
     if((unsigned long)(millis() - settings.health.lastRetrieved) > (unsigned long)settings.health.updateFrequency){
 
-      //We want to ignore the first attempt to run the health check, otherwise it will fire on startup, which is abusive
+      //We want to ignore the first attempt to run the health check
       if(settings.health.lastRetrieved > 0) {
         
         broadcastLine(padRight("", 64, "#"));
@@ -280,17 +316,14 @@ void loop() {
       settings.firmware.lastRetrieved = millis();
       
     }
+
+    if((unsigned long)(millis() - settings.sensors.lastRetrieved) > settings.sensors.updateFrequency){
+
+      //Get Roomba's data
+      getRoombaData();
     
-  }
-
-  int inByte = 0;
-
-  //Watch the serial line for unsolicited communications
-  if(Serial.available()){
-
-    inByte = Serial.read();
-  
-    broadcastLine((String)(char)inByte);
+    }
+    
   }
 
 }
@@ -328,10 +361,13 @@ void setupProvisioningMode(){
   IPAddress gateway(192, 168, 1, 1);
   IPAddress subnet(255, 255, 255, 0);
   
+  //Create an access point
   WiFi.softAPConfig(ip, gateway, subnet);
   
+  //Set the AP name Roomba-.....
   WiFi.softAP(("Roomba-" + settings.deviceName).c_str());
 
+  //Listen for web server requests
   webServer.on("/", wwwHandleRoot);
   webServer.onNotFound(wwwHandleNotFound);
 
@@ -343,9 +379,6 @@ void setupProvisioningMode(){
 
   webServer.begin();
   
-  broadcastLine("Device requires provisioning.\n");
-  broadcastLine("Connect to Access Point Roomba-" + settings.deviceName + " and point your browser to http://192.168.1.1 to begin.  To update firmware, go to http://192.168.1.1/update.\n");
-  
 }
 
 
@@ -354,27 +387,22 @@ void attemptProvision(String SSID, String wpaKey, String bootstrapURL){
   //Kill the soft AP
   WiFi.softAPdisconnect(true);
 
+  //Connect to the requested SSID
   WiFi.mode(WIFI_STA);
   WiFi.begin(SSID.c_str(), wpaKey.c_str());
 
   //Remember the start time
   unsigned long timeStartConnect = millis();
-
-  broadcastLine("Attempting to connect to network " + SSID + "\n");
   
   //Print output while waiting for WiFi to connect
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
-    //Serial.print(".");
 
     //Set a timer for 30 seconds to connect
     if(millis() - timeStartConnect > 30000){
 
       //Disconnect the WiFi
       WiFi.disconnect();
-
-      //Write an error
-      broadcastLine("\nAttempting to provision failed!  Unable to connect to AP specified.\n");
 
       //Restart the provisioning server
       setupProvisioningMode();
@@ -385,30 +413,33 @@ void attemptProvision(String SSID, String wpaKey, String bootstrapURL){
     }
   }
 
-  //Serial.print("connected.");
   broadcastLine("\n");
-  broadcastLine("IP address: " + WiFi.localIP().toString() + "\nMAC Address: " + WiFi.macAddress() + "\n");
+  broadcastLine("IP address: " + WiFi.localIP().toString() + "\nMAC Address: " + WiFi.macAddress());
 
+  //Attempt to retrieve the bootstrap
   if(retrieveBootstrap(bootstrapURL) == true){
-      broadcastLine("Retrieved configuration successfully.  Restarting.\n");
+    broadcastLine("Retrieved configuration successfully.  Restarting.\n");
 
-      //Ensure the EEPROM has time to finish writing and closing the client
-      delay(1000);
+    //Ensure the EEPROM has time to finish writing and closing the client
+    delay(1000);
 
-      //Restart
-      ESP.restart();
+    //Restart
+    ESP.restart();
       
-    } else {
+  } else {
       
-      //Restart on failure
-      ESP.restart();
+    //Restart on failure
+    ESP.restart();
 
-    }
+  }
 
 }
 
 
 boolean retrieveBootstrap(String bootstrapURL){
+  /*
+    Retrieves the bootstrap JSON document from the provided URL.  On success, writes "TRUE" to the EEPROM and the provisioning information.
+  */
   
   HTTPClient httpClient;
 
@@ -467,7 +498,7 @@ void reconnectMQTT() {
       
     } else {
       
-      broadcastLine("failed, rc=" + (String)mqttClient.state() + "\n");
+      broadcastLine("failed, rc=" + (String)mqttClient.state());
       broadcastLine("Try again in 5 seconds.\n");
       
       // Wait 5 seconds before retrying
@@ -487,15 +518,16 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     receivedPayload = String(receivedPayload + (char)payload[i]);
   }
 
+  //Clean the payload received
   receivedPayload.trim();
 
+  //Pass the payload off for further processing
   handleMQTTManagementMessage(String(topic), receivedPayload);
 
 }
 
 
 void publishMQTT(String topic, String payload){
-  
   /*
    * Sends the requested payload to the requested topic, and also broadcasts the message on the serial line.
    */
@@ -505,13 +537,16 @@ void publishMQTT(String topic, String payload){
   payload.trim();
 
   mqttClient.publish(String(topic).c_str(), String(payload).c_str());
-  broadcastLine("<=> " + padRight(topic, 40, " ") + payload + "\n");
+  broadcastLine("<=> " + padRight(topic, 40, " ") + payload);
   
 }
 
 
 void handleMQTTManagementMessage(String topic, String payload){
-  /* Handles incoming management requests from MQTT.  Payloads must exactly match.  Output is echoed on serial and MQTT /client/# topic. */
+  /* 
+    Handles incoming management requests from MQTT.  Payloads must exactly match.
+    Output is echoed on telnet and MQTT /client/# topic. 
+  */
 
   //Copy the payload so we can modify it
   String payloadToLowerCase = payload;
@@ -522,7 +557,7 @@ void handleMQTTManagementMessage(String topic, String payload){
   //See if the payload requests a restart
   if(topic == settings.mqttServer.manageTopic + "/restart" && payloadToLowerCase == "request"){
 
-    publishMQTT(settings.mqttServer.clientTopic + "/restart", "OK");
+    publishMQTT(settings.mqttServer.clientTopic + "/status", "Restarting");
     
     delay(500);
     
@@ -551,15 +586,15 @@ void handleMQTTManagementMessage(String topic, String payload){
 
     if(retrieveBootstrap(payload) == true){
 
-      broadcastLine("Bootstrapped from " + payload + "\n");
-      publishMQTT(settings.mqttServer.clientTopic + "/bootstrap", "OK");
+      broadcastLine("Bootstrapped from " + payload);
+      publishMQTT(settings.mqttServer.clientTopic + "/status", "Bootstrap Requested");
       broadcastLine(EEPROMRead(EEPROMDataBegin));
 
       return;
       
     }else{
       
-      publishMQTT(settings.mqttServer.clientTopic + "/bootstrap", "Failed");
+      publishMQTT(settings.mqttServer.clientTopic + "/status", "Bootstrap Failed");
 
       return;
       
@@ -570,10 +605,10 @@ void handleMQTTManagementMessage(String topic, String payload){
   //Clear the EEPROM and reset provisioning
   if(topic == settings.mqttServer.manageTopic + "/provisionReset" && payloadToLowerCase == "request"){
 
+    //Erase the EEPROM flag and replace it with FALSE, which will force a provisioning
     EEPROMWrite("false", 0);
 
     publishMQTT(settings.mqttServer.clientTopic + "/status", "Provision Reset");
-    publishMQTT(settings.mqttServer.clientTopic + "/restart", "OK");
 
     //Ensure the EEPROM has time to finish writing and closing the client
     delay(1000);
@@ -643,7 +678,8 @@ void handleMQTTManagementMessage(String topic, String payload){
 
 void EEPROMWrite(String stringToWrite, int startPosition){
   /*
-   * This function writes a string of data to the EEPROM beginning at a specified address.  It is sandwiched between two non-printable ASCII characters (2/STX and 3/ETX)
+   * This function writes a string of data to the EEPROM beginning at a specified address.
+   * It is sandwiched between two non-printable ASCII characters (2/STX and 3/ETX)
    * to deliniate where the data begins and ends, which is used when reading the data.
    */
 
@@ -755,12 +791,15 @@ void broadcastLine(String data){
    * Prints the data input on the telnet client.
    */
 
-  telnetClient.print(data);
+  telnetClient.print(data + "\n");
   
 }
 
 
 String padRight(String data, int toLength, String padValue){
+  /* 
+  * Makes output pretty on the telnet client.
+  */
 
   while(data.length() < toLength){
     data = data + padValue;    
@@ -773,8 +812,9 @@ String padRight(String data, int toLength, String padValue){
 
 void handleHealth(){
 
-  broadcastLine("void handleHealth()");
-
+  //Publish the status of OK
+  publishMQTT(settings.mqttServer.clientTopic + "/status", "OK");
+  
   //Publish the uptime
   publishMQTT(settings.mqttServer.clientTopic + "/uptime", String(millis()));
 
@@ -787,129 +827,543 @@ void handleHealth(){
   //Publish the device name
   publishMQTT(settings.mqttServer.clientTopic + "/deviceName", settings.deviceName);
 
-  //Retrieve the battery info if Roomba isn't sleeping
-  //if(roombaData.currentStatus != SLEEPING){
-    
-  getBatteryInfo();
+  //Get the latest data from roomba
+  getRoombaData();
 
   //Publish Roomba's Charge State
-  publishMQTT(settings.mqttServer.sensorTopic + "/chargingState", roombaData.battery.chargingState);
+  publishMQTT(settings.mqttServer.sensorTopic + "/chargingState", roombaDataReported.battery.chargingState);
 
   //Publish Roomba's Battery Voltage
-  publishMQTT(settings.mqttServer.sensorTopic + "/batteryVoltage", (String)roombaData.battery.voltage);
+  publishMQTT(settings.mqttServer.sensorTopic + "/batteryVoltage", (String)roombaDataReported.battery.voltage);
 
   //Publish Roomba's Battery Temperature
-  publishMQTT(settings.mqttServer.sensorTopic + "/batteryTemperature", (String)roombaData.battery.temperature);
+  publishMQTT(settings.mqttServer.sensorTopic + "/batteryTemperature", (String)roombaDataReported.battery.temperature);
 
   //Publish Roomba's Battery Capacity
-  publishMQTT(settings.mqttServer.sensorTopic + "/batteryCapacity", (String)roombaData.battery.capacity);
+  publishMQTT(settings.mqttServer.sensorTopic + "/batteryCapacity", (String)roombaDataReported.battery.capacity);
 
   //Publish Roomba's Battery Charge
-  publishMQTT(settings.mqttServer.sensorTopic + "/batteryCharge", (String)roombaData.battery.charge);
+  publishMQTT(settings.mqttServer.sensorTopic + "/batteryCharge", (String)roombaDataReported.battery.charge);
 
   //Publish Roomba's Battery Percentage
-  publishMQTT(settings.mqttServer.sensorTopic + "/batteryPercentage", (String)roombaData.battery.percentRemaining);
+  publishMQTT(settings.mqttServer.sensorTopic + "/batteryPercentage", (String)roombaDataReported.battery.percentRemaining);
 
   //Publish Roomba's Battery Current
-  publishMQTT(settings.mqttServer.sensorTopic + "/batteryCurrent", (String)roombaData.battery.current);
+  publishMQTT(settings.mqttServer.sensorTopic + "/batteryCurrent", (String)roombaDataReported.battery.current);
+
+  //Publish Roomba's current status
+  publishMQTT(settings.mqttServer.sensorTopic + "/runStatus", runStatusToString());
 
 }
 
 
-void getBatteryInfo(){
-    broadcastLine("void getBatteryInfo()");
+String runStatusToString(){
+  /*
+  * Returns the Roomba run status as a string.
+  */
 
-  //Make sure we are respecting the minimum battery sensor read rate
-  if((unsigned long)(millis() - roombaData.battery.lastRetrieved) < (unsigned long)settings.sensors.updateFrequency){
+  switch(roombaDataObserved.runStatus){
 
-    broadcastLine("Ignoring getBatteryInfo; Abusive.\n");
+    case 0:
+      return "SLEEPING";
+      break;
 
-    //Not enough milliseconds have elapsed
-    return;
+    case 1:
+      return "CLEANING";
+      break;
 
+    case 2:
+      return "IDLING";
+      break;
+
+    default:
+      return "UNKNOWN";
   }
 
-  broadcastLine("Attempting to read Roomba's battery.\n");
+}
+
+void setRunStatus(int runStatus){
+  /*
+  * Sets Roomba's current runStatus and sends MQTT message if there is a change in state.
+  */
+
+  if(runStatus != roombaDataReported.runStatus){
+
+    //Set the updated status
+    roombaDataReported.runStatus = runStatus;
+    roombaDataObserved.runStatus = runStatus;
+
+    //Publish Roomba's current status
+    publishMQTT(settings.mqttServer.sensorTopic + "/runStatus", runStatusToString());
+  }
+
+}
+
+
+void getRoombaData(){
+  /*
+  * Retrieves packets of data from Roomba and saves them to the associated roombaData elements.
+  * When appropriate, broadcasts sensor data via MQTT.
+  */
 
   Serial1.write(128);
   delay(50);
-  Serial1.write(142);
+  Serial1.write(149); // Query List
   delay(50);
-  Serial1.write(3); //Retrieve packets 21-26, length of 10
+  Serial1.write(15); //15 packets
   delay(50);
+  Serial1.write(15); //Dirt detect, 1 byte, 0-255
+  delay(50);
+  Serial1.write(19); //Distance, 2 bytes, signed, -32768-32767
+  delay(50);
+  Serial1.write(21); //Battery charging state, 1 byte, unsigned, 0-5
+  delay(50);
+  Serial1.write(22); //Battery voltage, 2 bytes unsigned, 0-65535
+  delay(50);
+  Serial1.write(23); //Battery current, 2 bytes signed, -32768-32767
+  delay(50);
+  Serial1.write(24); //Battery temperature, 1 byte signed, -128-127
+  delay(50);
+  Serial1.write(25); //Battery charge, 2 bytes unsigned, 0-65535
+  delay(50);
+  Serial1.write(26); //Battery capacity, 2 bytes unsigned, 0-65535
+  delay(50);
+  Serial1.write(43); //Right encoder count, 2 bytes unsigned, 0-65535
+  delay(50);
+  Serial1.write(44); //Left encoder count, 2 bytes unsigned, 0-65535
+  delay(50);
+  Serial1.write(54); //Left motor current, 2 bytes signed, -32768-32767
+  delay(50);
+  Serial1.write(55); //Right motor current, 2 bytes signed, -32768-32767
+  delay(50);
+  Serial1.write(56); //Main brush motor current, 2 bytes signed, -32768-32767
+  delay(50);
+  Serial1.write(57); //Side brush motor current, 2 bytes signed, -32768-32767
+  delay(50);
+  Serial1.write(58); //Stasis caster, 1 byte, 0-2
+  delay(250);
 
-  int32_t tmpBuffer[10];
-  int i = 0;
+  char tmpBuffer[26];
+  int i=0;
 
-  while(Serial.available()){
+  //Ensure we have exactly 26 bytes to read
+  if(Serial.available() != 26){
 
-    tmpBuffer[i] = Serial.read();
+    //We did not get exactly 26 bytes back; skip this iteration
+    broadcastLine("Received " + (String)Serial.available() + " bytes on buffer, expected 26.  Skipping this iteration.");
     
-    i++;
+    settings.sensors.lastRetrieved = millis();
+
+    //Roomba will usually do this when it is sleeping, so set the mode to sleeping
+    setRunStatus(SLEEPING);
+
+    return;
+    
   }
 
-   //Get the charging state (0, 1)
-  switch(tmpBuffer[0]){
+  //We should have 26 bytes to read
+  while(Serial.available()){
+
+    
+    //Read the data into the buffer
+    tmpBuffer[i] = Serial.read();
+
+    i++;
+    
+  }
+
+  broadcastLine(padRight("", 64, "*"));
+
+  String debug = "";
+
+  for(i=0; i<sizeof(tmpBuffer); i++){
+
+    debug = debug + (String)(int)tmpBuffer[i];
+    
+  }
+
+  //If Roomba responded, set the mode to IDLING if not cleaning
+  if(roombaDataObserved.runStatus != CLEANING){
+    setRunStatus(IDLING);
+  }
+
+  //Dirt detect, 1 byte, 0-255, element 0; Increment the value at the position by 1
+  roombaDataObserved.dirtiness[tmpBuffer[0]]++;
+  broadcastLine("Raw Dirtiness: " + (String)(int)tmpBuffer[0]);
+
+  //Distance, 2 bytes, signed, -32768-32767, element 1-2
+  //roombaDataObserved.odometer += combineBytesToSignedInt(tmpBuffer[1], tmpBuffer[2]);
+  //broadcastLine("roombaDataObserved.odometer: " + (String)roombaDataObserved.odometer);
+  broadcastLine("Raw Distance: [" + (String)(int)tmpBuffer[1] + "] [" + (String)(int)tmpBuffer[2] + "]");
+  //broadcastLine("Distance: " + combineBytesToSignedInt(tmpBuffer[1], tmpBuffer[2]));
+
+  //Battery charging state, 1 byte, unsigned, 0-5, element 3
+  switch(tmpBuffer[3]){
 
     case 0:
-      roombaData.battery.chargingState = "NOT_CHARGING";
+      roombaDataObserved.battery.chargingState = "NOT_CHARGING";
       break;
     
     case 1:
-      roombaData.battery.chargingState = "CHARGING_RECONDITIONING";
+      roombaDataObserved.battery.chargingState = "CHARGING_RECONDITIONING";
       break;
     
     case 2:
-      roombaData.battery.chargingState = "CHARGING_FULL";
+      roombaDataObserved.battery.chargingState = "CHARGING_FULL";
       break;
     
     case 3:
-      roombaData.battery.chargingState = "CHARGING_TRICKLE";
+      roombaDataObserved.battery.chargingState = "CHARGING_TRICKLE";
       break;
     
     case 4:
-      roombaData.battery.chargingState = "WAITING";
+      roombaDataObserved.battery.chargingState = "WAITING";
       break;
     
     case 5:
-      roombaData.battery.chargingState = "FAULT";
+      roombaDataObserved.battery.chargingState = "FAULT";
       break;
     
     default:
-      roombaData.battery.chargingState = "UNKNOWN";
+      roombaDataObserved.battery.chargingState = "UNKNOWN";
   }
+
+  broadcastLine("roombaDataObserved.battery.chargingState: " + roombaDataObserved.battery.chargingState);
   
-  //Get the voltage (1, 2)
-  roombaData.battery.voltage = combineBytesToInt((uint8_t)tmpBuffer[1], (uint8_t)tmpBuffer[2]);
+  //Battery voltage, 2 bytes unsigned, 0-65535, element 4-5
+  roombaDataObserved.battery.voltage = combineBytesToUnsignedInt(tmpBuffer[4], tmpBuffer[5]);
+  broadcastLine("roombaDataObserved.battery.voltage: " + (String)roombaDataObserved.battery.voltage);
 
-  //Get the current (3,2)
-  roombaData.battery.current = combineBytesToInt(tmpBuffer[3], tmpBuffer[4]);
+  //Battery current, 2 bytes signed, -32768-32767, element 6-7
+  roombaDataObserved.battery.current = combineBytesToSignedInt(tmpBuffer[6], tmpBuffer[7]);
+  broadcastLine("roombaDataObserved.battery.current: " + (String)roombaDataObserved.battery.current);
 
-  broadcastLine("tmpBuffer[3]: [" + (String)tmpBuffer[3] + "] tmpBuffer[4]: [" + (String)tmpBuffer[4] + "]\n");
+  //Battery temperature, 1 byte signed, -128-127, element 8
+  roombaDataObserved.battery.temperature = tmpBuffer[8];
+  broadcastLine("roombaDataObserved.battery.temperature: " + (String)roombaDataObserved.battery.temperature);
 
-  //Get the temperature (5, 1)
-  roombaData.battery.temperature = tmpBuffer[5];
+  //Battery charge, 2 bytes unsigned, 0-65535, element 9-10
+  roombaDataObserved.battery.charge = combineBytesToUnsignedInt(tmpBuffer[9], tmpBuffer[10]);
+  broadcastLine("roombaDataObserved.battery.charge: " + (String)roombaDataObserved.battery.charge);
 
-  //Get the charge (6, 2)
-  roombaData.battery.charge = combineBytesToInt((uint8_t)tmpBuffer[6], (uint8_t)tmpBuffer[7]);
+  //Battery capacity, 2 bytes unsigned, 0-65535, element 11-12
+  roombaDataObserved.battery.capacity = combineBytesToUnsignedInt(tmpBuffer[11], tmpBuffer[12]);
+  broadcastLine("roombaDataObserved.battery.capacity: " + (String)roombaDataObserved.battery.capacity);
 
-  //Get the capacity (8, 2)
-  roombaData.battery.capacity = combineBytesToInt((uint8_t)tmpBuffer[8], (uint8_t)tmpBuffer[9]);
+  //Right encoder count, 2 bytes unsigned, 0-65535, element 13-14
+  roombaDataObserved.wheels.rightEncoder = roombaDataObserved.wheels.rightEncoder + combineBytesToUnsignedInt(tmpBuffer[13], tmpBuffer[14]);
+  //broadcastLine("roombaDataObserved.wheels.rightEncoder: " + (String)roombaDataObserved.wheels.rightEncoder);
+  broadcastLine("Raw right encoder: " + (String)combineBytesToUnsignedInt(tmpBuffer[13], tmpBuffer[14]));
 
-  //Get the percent remaining
-  roombaData.battery.percentRemaining = round(((float)roombaData.battery.charge / (float)roombaData.battery.capacity) * 100);
+  //Left encoder count, 2 bytes unsigned, 0-65535, element 15-16
+  roombaDataObserved.wheels.leftEncoder = roombaDataObserved.wheels.leftEncoder + combineBytesToUnsignedInt(tmpBuffer[15], tmpBuffer[16]);
+  //broadcastLine("roombaDataObserved.wheels.leftEncoder: " + (String)roombaDataObserved.wheels.leftEncoder);
+  broadcastLine("Raw left encoder: " + (String)combineBytesToUnsignedInt(tmpBuffer[15], tmpBuffer[16]));
 
-  //Set the last retrieved time
-  roombaData.battery.lastRetrieved = millis();
-  
+  //Left motor current, 2 bytes signed, -32768-32767, elemnet 17-18
+  roombaDataObserved.motorCurrent.leftWheel = combineBytesToSignedInt(tmpBuffer[17], tmpBuffer[18]);
+  broadcastLine("roombaDataObserved.motorCurrent.leftWheel: " + (String)roombaDataObserved.motorCurrent.leftWheel);
+
+  //Right motor current, 2 bytes signed, -32768-32767, elemnet 19-20
+  roombaDataObserved.motorCurrent.rightWheel = combineBytesToSignedInt(tmpBuffer[19], tmpBuffer[20]);
+  broadcastLine("roombaDataObserved.motorCurrent.rightWheel: " + (String)roombaDataObserved.motorCurrent.rightWheel);
+
+  //Main brush motor current, 2 bytes signed, -32768-32767, element 21-22
+  roombaDataObserved.motorCurrent.mainBrush = combineBytesToSignedInt(tmpBuffer[21], tmpBuffer[22]);
+  broadcastLine("roombaDataObserved.motorCurrent.mainBrush: " + (String)roombaDataObserved.motorCurrent.mainBrush);
+
+  //Side brush motor current, 2 bytes signed, -32768-32767, 23-24
+  roombaDataObserved.motorCurrent.sideBrush = combineBytesToSignedInt(tmpBuffer[23], tmpBuffer[24]);
+  broadcastLine("roombaDataObserved.motorCurrent.sideBrush: " + (String)roombaDataObserved.motorCurrent.sideBrush);
+
+  //Stasis caster, 1 byte, 0-2, element 25
+  roombaDataObserved.stasis = tmpBuffer[25];
+  broadcastLine("roombaDataObserved.stasis: " + (String)roombaDataObserved.stasis);
+
+  broadcastLine(padRight("", 64, "*"));
+
+  settings.sensors.lastRetrieved = millis();
+
+  //Report any sensor changes necessary
+  reportRoombaSensorChanges();
+
+  //Determine if Roomba's cleaning mode has changed
+  toggleCleaningMode();
+
+}
+
+
+void reportRoombaSensorChanges(){
+  /* 
+  * Reports any changes greater than the minimumReportingDelta to MQTT
+  */
+
+  //Voltage
+  if(abs(roombaDataObserved.battery.voltage - roombaDataReported.battery.voltage) > settings.minimumReportingDelta.voltage) {
+
+    //Set the new reported value
+    roombaDataReported.battery.voltage = roombaDataObserved.battery.voltage;
+
+    //Publish an update
+    publishMQTT(settings.mqttServer.sensorTopic + "/batteryVoltage", (String)roombaDataReported.battery.voltage);
+  }
+
+  //Current
+  if(abs(roombaDataObserved.battery.current - roombaDataReported.battery.current) > settings.minimumReportingDelta.current) {
+
+    //Set the new reported value
+    roombaDataReported.battery.current = roombaDataObserved.battery.current;
+
+    //Publish an update
+    publishMQTT(settings.mqttServer.sensorTopic + "/batteryCurrent", (String)roombaDataReported.battery.current);
+  }
+
+  //Temperature
+  if(abs(roombaDataObserved.battery.temperature - roombaDataReported.battery.temperature) > settings.minimumReportingDelta.temperature) {
+
+    //Set the new reported value
+    roombaDataReported.battery.temperature = roombaDataObserved.battery.temperature;
+
+    //Publish an update
+    publishMQTT(settings.mqttServer.sensorTopic + "/batteryTemperature", (String)roombaDataReported.battery.temperature);
+  }
+
+  //Charge
+  if(abs(roombaDataObserved.battery.charge - roombaDataReported.battery.charge) > settings.minimumReportingDelta.charge) {
+
+    //Set the new reported value
+    roombaDataReported.battery.charge = roombaDataObserved.battery.charge;
+
+    //Publish an update
+    publishMQTT(settings.mqttServer.sensorTopic + "/batteryCharge", (String)roombaDataReported.battery.charge);
+  }
+
+  //Percent Remaining
+  if(abs(roombaDataObserved.battery.percentRemaining.toInt() - roombaDataReported.battery.percentRemaining.toInt()) > settings.minimumReportingDelta.percentRemaining) {
+
+    //Set the new reported value
+    roombaDataReported.battery.percentRemaining = roombaDataObserved.battery.percentRemaining;
+
+    //Publish an update
+    publishMQTT(settings.mqttServer.sensorTopic + "/batteryPercentage", (String)roombaDataReported.battery.percentRemaining);
+  }
+
+  //Charging State
+  if(roombaDataObserved.battery.chargingState != roombaDataReported.battery.chargingState){
+
+    //Set the new reported value
+    roombaDataReported.battery.chargingState = roombaDataObserved.battery.chargingState;
+
+    //Publish an update
+    publishMQTT(settings.mqttServer.sensorTopic + "/chargingState", (String)roombaDataReported.battery.chargingState);
+ 
+  }
+}
+
+
+void toggleCleaningMode(){
+  /*
+  * Looks at the received data to determine if Roomba's run status has changed
+  */
+
+  int voteForCleaningMode = 0;
+
+  //Roomba will always report NOT CHARGING or WAITING while cleaning
+  if(roombaDataObserved.battery.chargingState == "NOT_CHARGING" || roombaDataObserved.battery.chargingState == "WAITING" ){
+    voteForCleaningMode++;
+  }
+
+  //Roomba will always consume > 500mA while cleaning.  Controller consumes ~130mA at idle
+  if(roombaDataObserved.battery.current < -500){
+    voteForCleaningMode++;
+  }
+
+  //Check the motor currents.  We'll give them 100mA buffer just for erroneous readings
+  if(roombaDataObserved.motorCurrent.leftWheel > 100){
+    voteForCleaningMode++;
+  }
+
+  if(roombaDataObserved.motorCurrent.rightWheel > 100){
+    voteForCleaningMode++;
+  }
+
+  if(roombaDataObserved.motorCurrent.mainBrush > 100){
+    voteForCleaningMode++;
+  }
+
+  if(roombaDataObserved.motorCurrent.sideBrush > 100){
+    voteForCleaningMode++;
+  }
+
+  //If the stasis reports 1 then Roomba is moving forward
+  if(roombaDataObserved.stasis == 1){
+    voteForCleaningMode++;
+  }
+
+  //There are 7 potential votes for cleaning, though not all of them will always be triggered.  Majority will rule.
+  if(voteForCleaningMode >= 4 && roombaDataObserved.runStatus != CLEANING){
+
+    //We have now begun cleaning
+    beginCleaningMode();
+
+  }
+
+  //If we have 0 or 1 votes and our last observation as that we were cleaning, we need to end the cleaning cycle.
+  if(voteForCleaningMode <= 1 && roombaDataObserved.runStatus == CLEANING){
+
+    //We are no longer cleaning
+    endCleaningMode();
+
+  }
+
+  //If we have 2 or 3 votes, just assume the same condition we were previously in since it could be ambiguous
+
+}
+
+
+void beginCleaningMode(){
+  /*
+  * Changes the value of Roomba cleaning, which resets certain counters.
+  * This is automatically triggered when the controller notices changes in the motors, regardless if triggered from the controller or directly
+  * on Roomba's control panel.  This function's compliment is endCleaningMode();
+  */
+
+  //Set the start time to now
+  roombaDataObserved.cleaningCycle.startTime = millis();
+
+  //Clear the end time and runTime
+  roombaDataObserved.cleaningCycle.endTime = roombaDataObserved.cleaningCycle.startTime;
+  roombaDataObserved.cleaningCycle.runTime = 0;
+
+  //Set the run status
+  setRunStatus(CLEANING);
+
+  //Clear the dirtiness array
+  for(int i=0; i < sizeof(roombaDataObserved.dirtiness); i++){
+
+    roombaDataObserved.dirtiness[i] = 0;
+
+  }
+
+  //Clear the odometer
+  roombaDataObserved.odometer = 0;
+
+  //Publish Roomba's health
+  handleHealth();
+
+}
+
+
+void endCleaningMode() {
+  /*
+  * Changes the value of Roomba cleaning, which resets certain counters.
+  * This is automatically triggered when the controller notices changes in the motors, regardless if triggered from the controller or directly
+  * on Roomba's control panel.  This function's compliment is beginCleaningMode();
+  */
+
+  //Set the end time to now
+  roombaDataObserved.cleaningCycle.endTime = millis();
+
+  //Set the runTime
+  roombaDataObserved.cleaningCycle.runTime = roombaDataObserved.cleaningCycle.endTime - roombaDataObserved.cleaningCycle.startTime;
+
+  //Set the run status
+
+  setRunStatus(IDLING);
+
+  int averageDirtiness = 0;
+
+  //Determine the overall dirtiness
+  for(int i=0; i < sizeof(roombaDataObserved.dirtiness); i++){
+
+    //Average dirtiness is the multiplication of the dirtiness position (0-255) and the count of that dirtiness observed at that position
+    averageDirtiness = averageDirtiness + (i * roombaDataObserved.dirtiness[i]);
+
+  }
+
+  //Send MQTT messages
+  publishMQTT(settings.mqttServer.sensorTopic + "/runTime", (String)roombaDataObserved.cleaningCycle.runTime);
+  publishMQTT(settings.mqttServer.sensorTopic + "/odometer", (String)roombaDataObserved.odometer);
+  publishMQTT(settings.mqttServer.sensorTopic + "/dirtiness", (String)averageDirtiness);
+
+  //Publish Roomba's health
+  handleHealth();
+
+}
+
+
+void observeEncoders(int16_t leftEncoder, int16_t rightEncoder){
+
+  //Determine the distance traveled since last Retrieved
+  int16_t distanceLeftEncoder = computeEncoderDistance(leftEncoder, roombaDataObserved.wheels.leftEncoder);
+  int16_t distanceRightEncoder = computeEncoderDistance(rightEncoder, roombaDataObserved.wheels.rightEncoder);
+
+  //Determine the average number of revolutions between the two encoders
+  float averageDistance = (distanceLeftEncoder + distanceRightEncoder) / 2;
+
+  //Convert the average distance to millimeters
+  float distanceTraveled = averageDistance * (pi * wheelRadius / wheelEncodersPerRevolution);
+
+  //Broadcast the distance
+  broadcastLine("Distance traveled this iteration: " + (String)(int)round(distanceTraveled));
+
+  //Add the distance traveled to the odometer
+  roombaDataObserved.odometer = roombaDataObserved.odometer + (int)round(distanceTraveled);
+
+  //Update the encoders
+  roombaDataObserved.wheels.leftEncoder = leftEncoder;
+  roombaDataObserved.wheels.rightEncoder = rightEncoder;
+
+}
+
+
+int16_t computeEncoderDistance(int16_t currentValue, int16_t previousValue){
+  /*
+  * Determines the absolute distance traveled by the encoder, including passing over the minimum or maximum values.
+  */ 
+
+  const int16_t floorValue = -32768;
+  const int16_t ceilingValue = 32767;
+  int16_t returnValue = 0;
+
+  //Determine if we should use the floor or ceiling to detect if we exceeded the previous value
+  if (previousValue > 0){
+
+    //Use the ceiling and determine if it was rolled over
+    if(previousValue + abs(currentValue) > ceilingValue){
+
+      //We rolled over the ceiling, so count from the previous value to the ceiling and also the current value
+      returnValue = (ceilingValue - previousValue) + abs(currentValue);
+    }
+    else {
+      //We did not roll over the ceiling, do a simple computation
+      returnValue = abs(currentValue - previousValue);
+    }
+  }
+  else {
+    //The previous reading was negative
+    if(previousValue - abs(currentValue) < floorValue){
+
+      //We rolled under the floor, so count from the previous value to the floor, then to the current value
+      returnValue = abs(floorValue) - abs(previousValue) + abs(currentValue);
+    }
+    else {
+      //We did not roll under the floor, do a simple computation
+      returnValue = abs(abs(previousValue) + currentValue);
+
+    }
+  }
+
+  return returnValue;
 }
 
 
 void commandRoombaClean(){
-      broadcastLine("void commandRoombaClean()");
 
   //Ensure Roomba is awake
-  commandRoombaWake();
+  if(roombaDataObserved.runStatus == SLEEPING){
+    commandRoombaWake();
+  }
   
   broadcastLine("Commanding Roomba to Clean\n");
 
@@ -921,17 +1375,15 @@ void commandRoombaClean(){
   Serial1.write(135);
   delay(50);
 
-  //Set Roomba's status to cleaning
-  roombaData.currentStatus == CLEANING;
-
 }
 
 
 void commandRoombaDock(){
-        broadcastLine("void commandRoombaDock()");
 
   //Ensure Roomba is awake
-  commandRoombaWake();
+  if(roombaDataObserved.runStatus == SLEEPING){
+    commandRoombaWake();
+  }
 
   broadcastLine("Commanding Roomba to Return to Dock\n");
 
@@ -947,7 +1399,14 @@ void commandRoombaDock(){
 
 
 void commandRoombaStop(){
-        broadcastLine("void commandRoombaStop()");
+
+  //Only allow Roomba to stop if it is currently cleaning
+  if(roombaDataObserved.runStatus != CLEANING){
+
+    broadcastLine("Roomba is not cleaning; No need to Stop\n");
+    return;
+  }
+
   broadcastLine("Commanding Roomba to Stop\n");
 
   //Send the command to Roomba
@@ -957,15 +1416,15 @@ void commandRoombaStop(){
   delay(50);
   Serial1.write(133);
   delay(50);
-
-  //Set Roomba's status to SLEEPING
-  roombaData.currentStatus == SLEEPING;
   
 }
 
 
 void commandRoombaResetSchedule(){
-  broadcastLine("void commandRoombaResetSchedule()");
+  /*
+  * Clears Roomba's built-in schedule so it never runs.  Future runtimes will be defined by MQTT.
+  */
+
   broadcastLine("Resetting Roomba's Schedule to Never Clean\n");
 
   //Send the commands to Roomba
@@ -986,8 +1445,9 @@ void commandRoombaResetSchedule(){
 
 
 void commandRoombaSetDayTime(String roombaTimeFormattedTime){
-    broadcastLine("void commandRoombaSetDayTime(String roombaTimeFormattedTime)");
-  //Requires time in "WEEKDAYNAME,hh:mm" format, inclusive of leading zero's
+  /*
+  * Sets Roomba's day and time.  Requires time in "WEEKDAYNAME,hh:mm" format, inclusive of leading zero's
+  */
 
   //Force the input string to lowercase
   roombaTimeFormattedTime.toLowerCase();
@@ -1029,7 +1489,7 @@ void commandRoombaSetDayTime(String roombaTimeFormattedTime){
     dayCode = 6;
   }
 
-  //Validate we have a correct day
+  //Validate we have valid data
   if(dayCode == -1){
     
     broadcastLine("Failed to set day time.  DayCode = " + (String)dayCode + ".  Passed string: [" + roombaTimeFormattedTime + "]");
@@ -1066,7 +1526,10 @@ void commandRoombaSetDayTime(String roombaTimeFormattedTime){
 
 
 void commandRoombaReboot(){
-    broadcastLine("void commandRoombaReboot()");
+  /*
+  * Forces Roomba to reboot, essentially a battery remove/insert.  This resets the clock and schedules.
+  */
+
   broadcastLine("Rebooting Roomba.\n");
   
   Serial1.write(128);
@@ -1076,22 +1539,14 @@ void commandRoombaReboot(){
   
   broadcastLine("Done.\n");
 
-  //Set Roomba's status to SLEEPING
-  roombaData.currentStatus == SLEEPING;
-
 }
 
 
 void commandRoombaWake(){
-broadcastLine("void commandRoombaWake()");
-  //debug
-  roombaData.currentStatus = IDLING;
-
-  return;
 
 
   //Only attempt to wake Roomba when it is sleeping
-  if(roombaData.currentStatus != SLEEPING){
+  if(roombaDataObserved.runStatus != SLEEPING){
 
     return;
   }
@@ -1104,10 +1559,52 @@ broadcastLine("void commandRoombaWake()");
   digitalWrite(wakePin, HIGH);
 
   //Set the status to idling
-  roombaData.currentStatus = IDLING;
+  setRunStatus(IDLING);
 
   broadcastLine("Done.\n");
  
+}
+
+
+uint16_t combineBytesToUnsignedInt(char byteHigh, char byteLow){
+  /* 
+  * Converts a 2-byte number into an unsigned integer
+  */
+
+  uint16_t returnValue;
+
+  returnValue = byteHigh;
+
+  //Store the high byte on the first 8 bytes
+  returnValue = returnValue << 8;
+
+  //Shift the low byte to the right 8 bytes
+  returnValue |= byteLow & 0x00FF;
+
+  //Return the new value
+  return returnValue;  
+  
+}
+
+
+int16_t combineBytesToSignedInt(char byteHigh, char byteLow){
+  /* 
+  * Converts a 2-byte number into a signed integer
+  */
+
+  int16_t returnValue;
+
+  returnValue = byteHigh;
+
+  //Store the high byte on the first 8 bytes
+  returnValue = returnValue << 8;
+
+  //Shift the low byte to the right 8 bytes
+  returnValue |= byteLow & 0x00FF;
+
+  //Return the new value
+  return returnValue;  
+  
 }
 
 
@@ -1152,7 +1649,6 @@ void wwwHandleRoot(){
 }
 
 
-
 void wwwHandleSubmit(){
 
   //See if we're trying to submit for the provisioning page
@@ -1167,7 +1663,7 @@ void wwwHandleSubmit(){
     wpaKey.trim();
     bootstrapURL.trim();
       
-    broadcastLine("Attempting SSID " + SSID + " with WPA Key " + wpaKey + ".\nBootstrap URL: " + bootstrapURL + "\n");
+    broadcastLine("Attempting SSID " + SSID + " with WPA Key " + wpaKey + ".\nBootstrap URL: " + bootstrapURL);
     
     webServer.sendHeader("Connection", "close");
     webServer.sendHeader("Access-Control-Allow-Origin", "*");
@@ -1193,28 +1689,6 @@ void wwwHandleSubmit(){
 }
 
 
-int combineBytesToInt(int byteHigh, int byteLow){
-
-  int16_t returnValue = 0;
-  int tmpByteHigh = 0;
-  int tmpByteLow = 0;
-
-  //Store the temporary values and left-justify them
-  tmpByteHigh = byteHigh << 8;
-  tmpByteLow = byteLow >> 8;
-
-  //Store the combined result
-  returnValue = tmpByteHigh;
-
-  //Pad the last 8 bytes
-  returnValue |= tmpByteLow;
-
-  //Return the new value
-  return returnValue;  
-  
-}
-  
-
 void wwwHandleNotFound(){
   String message = "File Not Found\n\n";
   message += "URI: ";
@@ -1225,7 +1699,7 @@ void wwwHandleNotFound(){
   message += webServer.args();
   message += "\n";
   for (uint8_t i=0; i<webServer.args(); i++){
-    message += " " + webServer.argName(i) + ": " + webServer.arg(i) + "\n";
+    message += " " + webServer.argName(i) + ": " + webServer.arg(i);
   }
   webServer.send(404, "text/plain", message);
 }
@@ -1267,22 +1741,23 @@ void checkFirmwareUpgrade(){
     String firmwareBinURL = root["url"].asString();
 
     broadcastLine(padRight("", 64, "%"));
-    broadcastLine("Current firmware version: " + (String)firmwareVersion + "\n");
-    broadcastLine( "Available firmware version: " + (String)newFirmwareVersion + "\n");
+    broadcastLine("Current firmware version: " + (String)firmwareVersion);
+    broadcastLine( "Available firmware version: " + (String)newFirmwareVersion);
 
     //Check if the version requested is not the same as the one loaded (yes, we allow back flashing)
     if( (String)newFirmwareVersion != (String)firmwareVersion ) {
-      broadcastLine( "Preparing to update firmware using " + firmwareBinURL + "\n");
-      publishMQTT(settings.mqttServer.clientTopic + "/firmwareUpdate", "Updating");
+      broadcastLine( "Preparing to update firmware using " + firmwareBinURL);
       publishMQTT(settings.mqttServer.clientTopic + "/status", "Updating Firmware");
+
+      //Wait 1 second for the message to be sent
+      delay(1000);
 
       //Attempt to retrieve the firmware and perform the update
       t_httpUpdate_return firmwareUpdateResponse = ESPhttpUpdate.update(firmwareBinURL);
 
       switch(firmwareUpdateResponse) {
         case HTTP_UPDATE_FAILED:
-          broadcastLine("HTTP Firmware Update Error: " + (String)ESPhttpUpdate.getLastErrorString().c_str() + "\n");
-          publishMQTT(settings.mqttServer.clientTopic + "/firmwareUpdate", "Failed");
+          broadcastLine("HTTP Firmware Update Error: " + (String)ESPhttpUpdate.getLastErrorString().c_str());
           publishMQTT(settings.mqttServer.clientTopic + "/status", "Firmware Update Failed");
           publishMQTT(settings.mqttServer.clientTopic + "/firmware", (String)firmwareVersion);
           break;
@@ -1298,8 +1773,7 @@ void checkFirmwareUpgrade(){
     }
   }
   else {
-    broadcastLine("Firmware version check failed, got HTTP response code " + (String)httpCode + " while trying to retrieve firmware version from " + (String)firmwareVersionURL + "\n");
-    publishMQTT(settings.mqttServer.clientTopic + "/firmwareUpdate", "Failed");
+    broadcastLine("Firmware version check failed, got HTTP response code " + (String)httpCode + " while trying to retrieve firmware version from " + (String)firmwareVersionURL);
     publishMQTT(settings.mqttServer.clientTopic + "/status", "Firmware Update Failed");
     publishMQTT(settings.mqttServer.clientTopic + "/firmware", (String)firmwareVersion);
   }
