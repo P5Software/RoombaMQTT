@@ -157,7 +157,7 @@ typedef struct structRoombaData{
 const int wakePin = D3;
 const int EEPROMLength = 512;
 const int EEPROMDataBegin = 10; //Reserving the first 10 addresses for provision statuses
-const int wheelRadius = 69; //mm, measured tire
+const int wheelRadius = 72; //mm
 const float wheelEncodersPerRevolution = 508.8; //Provided by iRobot
 const float pi = 3.14159265359;
 struct structSettings settings;
