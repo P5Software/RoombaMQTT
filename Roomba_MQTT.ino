@@ -206,7 +206,8 @@ void setup() {
   settings.minimumReportingDelta.current = 512; //512mA
   settings.minimumReportingDelta.temperature = 2; //2 degrees Celcius
   settings.minimumReportingDelta.charge = 50; //50mAh
-  settings.minimumReportingDelta.percentRemaining = 1; //One percent
+  settings.minimumReportingDelta.percentRemaining = 0; //Any Change
+  settings.minimumReportingDelta.capacity = 1; //One mAh
   
   //Check the provisioning status
   checkDeviceProvisioned();
