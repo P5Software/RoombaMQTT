@@ -69,7 +69,7 @@
 #include <Math.h>
 
 
-const int firmwareVersion = 5;
+const int firmwareVersion = X;
 
 
 typedef struct structSettings{
