@@ -961,8 +961,19 @@ void getRoombaData(){
   //Ensure we have exactly 26 bytes to read
   if(Serial.available() != 26){
 
-    //We did not get exactly 26 bytes back; skip this iteration
-    broadcastLine("Received " + (String)Serial.available() + " bytes on buffer, expected 26.  Skipping this iteration.");
+    if(Serial.available() > 0){
+      
+      //We did not get exactly 26 bytes back, but we did get something; skip this iteration
+      broadcastLine("Received " + (String)Serial.available() + " bytes on buffer, expected 26.  Skipping this iteration and dropping " + (String)Serial.available() + " bytes to the floor.");
+
+      //Clear the buffer
+      while(Serial.available()){
+        
+        broadcastLine((String)(char)Serial.read());
+      
+      }
+
+    }
     
     settings.sensors.lastRetrieved = millis();
 
