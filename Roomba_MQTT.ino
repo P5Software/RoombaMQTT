@@ -830,26 +830,31 @@ void handleHealth(){
   //Get the latest data from roomba
   getRoombaData();
 
-  //Publish Roomba's Charge State
-  publishMQTT(settings.mqttServer.sensorTopic + "/chargingState", roombaDataReported.battery.chargingState);
+  //Because we have inaccurate data while sleeping, only broadcast the sensor data when we are able to read them
+  if(runStatusToString() != SLEEPING){
 
-  //Publish Roomba's Battery Voltage
-  publishMQTT(settings.mqttServer.sensorTopic + "/batteryVoltage", (String)roombaDataReported.battery.voltage);
-
-  //Publish Roomba's Battery Temperature
-  publishMQTT(settings.mqttServer.sensorTopic + "/batteryTemperature", (String)roombaDataReported.battery.temperature);
-
-  //Publish Roomba's Battery Capacity
-  publishMQTT(settings.mqttServer.sensorTopic + "/batteryCapacity", (String)roombaDataReported.battery.capacity);
-
-  //Publish Roomba's Battery Charge
-  publishMQTT(settings.mqttServer.sensorTopic + "/batteryCharge", (String)roombaDataReported.battery.charge);
-
-  //Publish Roomba's Battery Percentage
-  publishMQTT(settings.mqttServer.sensorTopic + "/batteryPercentage", (String)roombaDataReported.battery.percentRemaining);
-
-  //Publish Roomba's Battery Current
-  publishMQTT(settings.mqttServer.sensorTopic + "/batteryCurrent", (String)roombaDataReported.battery.current);
+    //Publish Roomba's Charge State
+    publishMQTT(settings.mqttServer.sensorTopic + "/chargingState", roombaDataReported.battery.chargingState);
+  
+    //Publish Roomba's Battery Voltage
+    publishMQTT(settings.mqttServer.sensorTopic + "/batteryVoltage", (String)roombaDataReported.battery.voltage);
+  
+    //Publish Roomba's Battery Temperature
+    publishMQTT(settings.mqttServer.sensorTopic + "/batteryTemperature", (String)roombaDataReported.battery.temperature);
+  
+    //Publish Roomba's Battery Capacity
+    publishMQTT(settings.mqttServer.sensorTopic + "/batteryCapacity", (String)roombaDataReported.battery.capacity);
+  
+    //Publish Roomba's Battery Charge
+    publishMQTT(settings.mqttServer.sensorTopic + "/batteryCharge", (String)roombaDataReported.battery.charge);
+  
+    //Publish Roomba's Battery Percentage
+    publishMQTT(settings.mqttServer.sensorTopic + "/batteryPercentage", (String)roombaDataReported.battery.percentRemaining);
+  
+    //Publish Roomba's Battery Current
+    publishMQTT(settings.mqttServer.sensorTopic + "/batteryCurrent", (String)roombaDataReported.battery.current);
+    
+  }
 
   //Publish Roomba's current status
   publishMQTT(settings.mqttServer.sensorTopic + "/runStatus", runStatusToString());
