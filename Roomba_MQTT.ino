@@ -111,6 +111,7 @@ typedef struct structSettings{
     int temperature;
     int charge;
     int percentRemaining;
+    int capacity;
   } minimumReportingDelta;
 
 };
