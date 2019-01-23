@@ -1157,13 +1157,22 @@ void reportRoombaSensorChanges(){
   }
 
   //Percent Remaining
-  if(abs(roombaDataObserved.battery.percentRemaining.toInt() - roombaDataReported.battery.percentRemaining.toInt()) > settings.minimumReportingDelta.percentRemaining) {
+  if(roombaDataObserved.battery.capacity >= 0 && roombaDataObserved.battery.charge > 0){
+
+    //Calculate the percent remaining
+    roombaDataObserved.battery.percentRemaining = round(((float)roombaDataObserved.battery.charge/(float)roombaDataObserved.battery.capacity)*100);
+    
+    if(abs(roombaDataObserved.battery.percentRemaining.toInt() - roombaDataReported.battery.percentRemaining.toInt()) > settings.minimumReportingDelta.percentRemaining) {
 
     //Set the new reported value
     roombaDataReported.battery.percentRemaining = roombaDataObserved.battery.percentRemaining;
 
     //Publish an update
     publishMQTT(settings.mqttServer.sensorTopic + "/batteryPercentage", (String)roombaDataReported.battery.percentRemaining);
+    
+    }
+
+    
   }
 
   //Charging State
