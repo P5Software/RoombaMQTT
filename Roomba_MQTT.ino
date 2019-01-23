@@ -894,6 +894,13 @@ void setRunStatus(int runStatus){
 
   if(runStatus != roombaDataReported.runStatus){
 
+    //If we have changed to sleep mode, end cleaning mode
+    if(runStatus == SLEEPING && roombaDataObserved.runStatus == CLEANING){
+
+      //We are no longer cleaning
+      endCleaningMode();
+    }
+
     //Set the updated status
     roombaDataReported.runStatus = runStatus;
     roombaDataObserved.runStatus = runStatus;
