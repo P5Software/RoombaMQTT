@@ -43,7 +43,6 @@
  *        runStatus (Roomba's current running mode, as string [SLEEPING, CLEANING, IDLING])
  *        runTime (amount of time the last cleaing mode ran, in ms)
  *        odometer (distance Roomba traveled in last cleaning mode, in mm)
- *        dirtiness (average dirtiness reported by Roomba during last cleaning mode, as integer)
  * 
  *    Device Name is the MAC address with no spaces, dashes, or colons.  MAC AA:BB:CC:DD:EE:00 = AABBCCDDEE00.
  *    
@@ -121,7 +120,6 @@ typedef struct structRoombaData{
   
   int runStatus;
   unsigned long odometer;
-  unsigned int dirtiness[256];
   int stasis;
 
   struct {
@@ -988,14 +986,10 @@ void getRoombaData(){
   }
 
   //Dirt detect, 1 byte, 0-255, element 0; Increment the value at the position by 1
-  roombaDataObserved.dirtiness[tmpBuffer[0]]++;
-  broadcastLine("Raw Dirtiness: " + (String)(int)tmpBuffer[0]);
+  //This function does not work on a Roomba 770 and has been removed
 
   //Distance, 2 bytes, signed, -32768-32767, element 1-2
-  //roombaDataObserved.odometer += combineBytesToSignedInt(tmpBuffer[1], tmpBuffer[2]);
-  //broadcastLine("roombaDataObserved.odometer: " + (String)roombaDataObserved.odometer);
-  broadcastLine("Raw Distance: [" + (String)(int)tmpBuffer[1] + "] [" + (String)(int)tmpBuffer[2] + "]");
-  //broadcastLine("Distance: " + combineBytesToSignedInt(tmpBuffer[1], tmpBuffer[2]));
+  //This function does not work on a Roomba 770 and has been removed
 
   //Battery charging state, 1 byte, unsigned, 0-5, element 3
   switch(tmpBuffer[3]){
@@ -1238,18 +1232,8 @@ void beginCleaningMode(){
   //Set the run status
   setRunStatus(CLEANING);
 
-  //Clear the dirtiness array
-  for(int i=0; i < sizeof(roombaDataObserved.dirtiness); i++){
-
-    roombaDataObserved.dirtiness[i] = 0;
-
-  }
-
   //Clear the odometer
   roombaDataObserved.odometer = 0;
-
-  //Publish Roomba's health
-  handleHealth();
 
 }
 
@@ -1271,87 +1255,60 @@ void endCleaningMode() {
 
   setRunStatus(IDLING);
 
-  int averageDirtiness = 0;
-
-  //Determine the overall dirtiness
-  for(int i=0; i < sizeof(roombaDataObserved.dirtiness); i++){
-
-    //Average dirtiness is the multiplication of the dirtiness position (0-255) and the count of that dirtiness observed at that position
-    averageDirtiness = averageDirtiness + (i * roombaDataObserved.dirtiness[i]);
-
-  }
-
   //Send MQTT messages
   publishMQTT(settings.mqttServer.sensorTopic + "/runTime", (String)roombaDataObserved.cleaningCycle.runTime);
   publishMQTT(settings.mqttServer.sensorTopic + "/odometer", (String)roombaDataObserved.odometer);
-  publishMQTT(settings.mqttServer.sensorTopic + "/dirtiness", (String)averageDirtiness);
-
-  //Publish Roomba's health
-  handleHealth();
 
 }
 
 
-void observeEncoders(int16_t leftEncoder, int16_t rightEncoder){
+void observeEncoders(uint16_t leftEncoder, uint16_t rightEncoder){
 
   //Determine the distance traveled since last Retrieved
-  int16_t distanceLeftEncoder = computeEncoderDistance(leftEncoder, roombaDataObserved.wheels.leftEncoder);
-  int16_t distanceRightEncoder = computeEncoderDistance(rightEncoder, roombaDataObserved.wheels.rightEncoder);
+  uint16_t distanceLeftEncoder = computeEncoderDistance(leftEncoder, roombaDataObserved.wheels.leftEncoder);
+  broadcastLine("distanceLeftEncoder: " + (String)distanceLeftEncoder);
+  
+  uint16_t distanceRightEncoder = computeEncoderDistance(rightEncoder, roombaDataObserved.wheels.rightEncoder);
+  broadcastLine("distanceRightEncoder: " + (String)distanceRightEncoder);
 
   //Determine the average number of revolutions between the two encoders
   float averageDistance = (distanceLeftEncoder + distanceRightEncoder) / 2;
 
+  broadcastLine("Average Distance (encoders): " + (String)averageDistance);
+
   //Convert the average distance to millimeters
-  float distanceTraveled = averageDistance * (pi * wheelRadius / wheelEncodersPerRevolution);
+  float distanceTraveled = averageDistance * ((float)pi * (float)wheelRadius / (float)wheelEncodersPerRevolution);
 
   //Broadcast the distance
-  broadcastLine("Distance traveled this iteration: " + (String)(int)round(distanceTraveled));
+  broadcastLine("Distance traveled this iteration: " + (String)round(distanceTraveled));
 
   //Add the distance traveled to the odometer
-  roombaDataObserved.odometer = roombaDataObserved.odometer + (int)round(distanceTraveled);
+  roombaDataObserved.odometer = roombaDataObserved.odometer + round(distanceTraveled);
 
-  //Update the encoders
+  //Update the observed data
   roombaDataObserved.wheels.leftEncoder = leftEncoder;
   roombaDataObserved.wheels.rightEncoder = rightEncoder;
 
 }
 
 
-int16_t computeEncoderDistance(int16_t currentValue, int16_t previousValue){
+uint16_t computeEncoderDistance(uint16_t currentValue, uint16_t previousValue){
   /*
   * Determines the absolute distance traveled by the encoder, including passing over the minimum or maximum values.
   */ 
+  const uint16_t ceilingValue = 65535;
+  uint16_t returnValue = 0;
 
-  const int16_t floorValue = -32768;
-  const int16_t ceilingValue = 32767;
-  int16_t returnValue = 0;
+  //Use the ceiling and determine if it was rolled over
+  if(previousValue + currentValue > ceilingValue){ 
 
-  //Determine if we should use the floor or ceiling to detect if we exceeded the previous value
-  if (previousValue > 0){
-
-    //Use the ceiling and determine if it was rolled over
-    if(previousValue + abs(currentValue) > ceilingValue){
-
-      //We rolled over the ceiling, so count from the previous value to the ceiling and also the current value
-      returnValue = (ceilingValue - previousValue) + abs(currentValue);
-    }
-    else {
-      //We did not roll over the ceiling, do a simple computation
-      returnValue = abs(currentValue - previousValue);
-    }
+    //We rolled over the ceiling, so count from the previous value to the ceiling and also the current value
+    returnValue = (ceilingValue - previousValue) + currentValue;
   }
-  else {
-    //The previous reading was negative
-    if(previousValue - abs(currentValue) < floorValue){
-
-      //We rolled under the floor, so count from the previous value to the floor, then to the current value
-      returnValue = abs(floorValue) - abs(previousValue) + abs(currentValue);
-    }
-    else {
-      //We did not roll under the floor, do a simple computation
-      returnValue = abs(abs(previousValue) + currentValue);
-
-    }
+  else{
+    
+    //We did not roll over the ceiling, do a simple computation
+    returnValue = currentValue - previousValue;
   }
 
   return returnValue;
