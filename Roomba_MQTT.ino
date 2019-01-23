@@ -1058,15 +1058,16 @@ void getRoombaData(){
   roombaDataObserved.battery.capacity = combineBytesToUnsignedInt(tmpBuffer[11], tmpBuffer[12]);
   broadcastLine("roombaDataObserved.battery.capacity: " + (String)roombaDataObserved.battery.capacity);
 
-  //Right encoder count, 2 bytes unsigned, 0-65535, element 13-14
-  roombaDataObserved.wheels.rightEncoder = roombaDataObserved.wheels.rightEncoder + combineBytesToUnsignedInt(tmpBuffer[13], tmpBuffer[14]);
-  //broadcastLine("roombaDataObserved.wheels.rightEncoder: " + (String)roombaDataObserved.wheels.rightEncoder);
-  broadcastLine("Raw right encoder: " + (String)combineBytesToUnsignedInt(tmpBuffer[13], tmpBuffer[14]));
-
   //Left encoder count, 2 bytes unsigned, 0-65535, element 15-16
-  roombaDataObserved.wheels.leftEncoder = roombaDataObserved.wheels.leftEncoder + combineBytesToUnsignedInt(tmpBuffer[15], tmpBuffer[16]);
-  //broadcastLine("roombaDataObserved.wheels.leftEncoder: " + (String)roombaDataObserved.wheels.leftEncoder);
-  broadcastLine("Raw left encoder: " + (String)combineBytesToUnsignedInt(tmpBuffer[15], tmpBuffer[16]));
+  uint16_t leftEncoder = combineBytesToUnsignedInt(tmpBuffer[15], tmpBuffer[16]);
+  broadcastLine("Raw left encoder: " + (String)leftEncoder);
+
+  //Right encoder count, 2 bytes unsigned, 0-65535, element 13-14
+  uint16_t rightEncoder = combineBytesToUnsignedInt(tmpBuffer[13], tmpBuffer[14]);
+  broadcastLine("Raw right encoder: " + (String)rightEncoder);
+
+  //Observe the encoder data to retrieve the distance
+  observeEncoders(leftEncoder, rightEncoder);
 
   //Left motor current, 2 bytes signed, -32768-32767, elemnet 17-18
   roombaDataObserved.motorCurrent.leftWheel = combineBytesToSignedInt(tmpBuffer[17], tmpBuffer[18]);
@@ -1087,8 +1088,6 @@ void getRoombaData(){
   //Stasis caster, 1 byte, 0-2, element 25
   roombaDataObserved.stasis = tmpBuffer[25];
   broadcastLine("roombaDataObserved.stasis: " + (String)roombaDataObserved.stasis);
-
-  broadcastLine(padRight("", 64, "*"));
 
   settings.sensors.lastRetrieved = millis();
 
@@ -1181,7 +1180,7 @@ void toggleCleaningMode(){
     voteForCleaningMode++;
   }
 
-  //Roomba will always consume > 500mA while cleaning.  Controller consumes ~130mA at idle
+  //Roomba will always consume > 500mA while cleaning.  Controller consumes ~141mA at idle, so we'll add some buffer
   if(roombaDataObserved.battery.current < -500){
     voteForCleaningMode++;
   }
@@ -1335,8 +1334,10 @@ void commandRoombaClean(){
   if(roombaDataObserved.runStatus == SLEEPING){
     commandRoombaWake();
   }
-  
-  broadcastLine("Commanding Roomba to Clean\n");
+
+  broadcastLine(padRight("", 64, "["));
+  broadcastLine("Commanding Roomba to Clean");
+  broadcastLine(padRight("", 64, "]"));
 
   //Send the command to Roomba
   Serial1.write(128);
@@ -1356,7 +1357,9 @@ void commandRoombaDock(){
     commandRoombaWake();
   }
 
-  broadcastLine("Commanding Roomba to Return to Dock\n");
+  broadcastLine(padRight("", 64, "["));
+  broadcastLine("Commanding Roomba to Return to Dock");
+  broadcastLine(padRight("", 64, "]"));
 
   //Send the command to Roomba
   Serial1.write(128);
@@ -1378,7 +1381,9 @@ void commandRoombaStop(){
     return;
   }
 
-  broadcastLine("Commanding Roomba to Stop\n");
+  broadcastLine(padRight("", 64, "["));
+  broadcastLine("Commanding Roomba to Stop");
+  broadcastLine(padRight("", 64, "]"));
 
   //Send the command to Roomba
   Serial1.write(128);
@@ -1396,7 +1401,8 @@ void commandRoombaResetSchedule(){
   * Clears Roomba's built-in schedule so it never runs.  Future runtimes will be defined by MQTT.
   */
 
-  broadcastLine("Resetting Roomba's Schedule to Never Clean\n");
+  broadcastLine(padRight("", 64, "["));
+  broadcastLine("Resetting Roomba's Schedule to Never Clean");
 
   //Send the commands to Roomba
   Serial1.write(128);
@@ -1410,7 +1416,8 @@ void commandRoombaResetSchedule(){
     delay(10);
   }
 
-  broadcastLine("Done.\n");
+  broadcastLine("Done");
+  broadcastLine(padRight("", 64, "]"));
   
 }
 
@@ -1462,22 +1469,30 @@ void commandRoombaSetDayTime(String roombaTimeFormattedTime){
 
   //Validate we have valid data
   if(dayCode == -1){
-    
+
+    broadcastLine(padRight("", 64, "!"));
     broadcastLine("Failed to set day time.  DayCode = " + (String)dayCode + ".  Passed string: [" + roombaTimeFormattedTime + "]");
+    broadcastLine(padRight("", 64, "!"));
     return;
   }
 
   if((hour.toInt() < 0) || (hour.toInt() >24)){
+    broadcastLine(padRight("", 64, "!"));
     broadcastLine("Failed to set day time.  Hour = " + (String)hour.toInt() + ".  Passed string: [" + roombaTimeFormattedTime + "]");
+    broadcastLine(padRight("", 64, "!"));
     return;
   }
 
   if((minute.toInt() < 0) || (minute.toInt() >60)){
+    broadcastLine(padRight("", 64, "!"));
     broadcastLine("Failed to set day time.  Minute = " + (String)minute.toInt() + ".  Passed string: [" + roombaTimeFormattedTime + "]");
+    broadcastLine(padRight("", 64, "!"));
     return;
   }
 
-  broadcastLine("Setting Roomba's Time to " + weekdayName + " [" + (String)dayCode + "] Hour: [" + (String)hour.toInt() + "] Minute: [" + (String)minute.toInt() + "]\n");
+  broadcastLine(padRight("", 64, "["));
+  broadcastLine("Setting Roomba's Time to " + weekdayName + " [" + (String)dayCode + "] Hour: [" + (String)hour.toInt() + "] Minute: [" + (String)minute.toInt() + "]");
+
 
   //Send the commands to Roomba
   Serial1.write(128);
@@ -1491,7 +1506,8 @@ void commandRoombaSetDayTime(String roombaTimeFormattedTime){
   Serial1.write(minute.toInt());
   delay(50);
 
-  broadcastLine("Done.\n");
+  broadcastLine("Done.");
+  broadcastLine(padRight("", 64, "]"));
 
 }
 
@@ -1522,7 +1538,8 @@ void commandRoombaWake(){
     return;
   }
 
-  broadcastLine("Waking Roomba.\n");
+  broadcastLine(padRight("", 64, "["));
+  broadcastLine("Commanding Roomba to Wake");
 
   //Pulse the pin to low then back to high, which wakes Roomba
   digitalWrite(wakePin, LOW);
@@ -1532,7 +1549,8 @@ void commandRoombaWake(){
   //Set the status to idling
   setRunStatus(IDLING);
 
-  broadcastLine("Done.\n");
+  broadcastLine("Done");
+  broadcastLine(padRight("", 64, "]"));
  
 }
 
