@@ -1127,7 +1127,7 @@ void reportRoombaSensorChanges(){
   }
 
   //Current
-  if(abs(roombaDataObserved.battery.current - roombaDataReported.battery.current) > settings.minimumReportingDelta.current) {
+  if(abs(abs(roombaDataObserved.battery.current) - abs(roombaDataReported.battery.current)) > settings.minimumReportingDelta.current || roombaDataReported.battery.current == 0) {
 
     //Set the new reported value
     roombaDataReported.battery.current = roombaDataObserved.battery.current;
@@ -1145,6 +1145,17 @@ void reportRoombaSensorChanges(){
     //Publish an update
     publishMQTT(settings.mqttServer.sensorTopic + "/batteryTemperature", (String)roombaDataReported.battery.temperature);
   }
+
+  //Capacity
+  if(abs(roombaDataObserved.battery.capacity - roombaDataReported.battery.capacity) > settings.minimumReportingDelta.capacity) {
+
+    //Set the new reported value
+    roombaDataReported.battery.capacity = roombaDataObserved.battery.capacity;
+
+    //Publish an update
+    publishMQTT(settings.mqttServer.sensorTopic + "/batteryCapacity", (String)roombaDataReported.battery.capacity);
+  }
+
 
   //Charge
   if(abs(roombaDataObserved.battery.charge - roombaDataReported.battery.charge) > settings.minimumReportingDelta.charge) {
