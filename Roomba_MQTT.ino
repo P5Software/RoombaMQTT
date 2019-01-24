@@ -305,7 +305,7 @@ void loop() {
     }
 
     //Handle firmware updates if enough time has passed
-    if((unsigned long)(millis() - settings.firmware.lastRetrieved) > (unsigned long)settings.firmware.updateFrequency){
+    if((unsigned long)(millis() - settings.firmware.lastRetrieved) > (unsigned long)settings.firmware.updateFrequency && roombaDataObserved.runStatus != CLEANING){
       
       broadcastLine("Checking firmware");
 
