@@ -199,13 +199,13 @@ void setup() {
   broadcastLine("Hostname is " +  WiFi.hostname());
 
   //Configure the settings
-  settings.health.updateFrequency = 1680000; //Every 28 minutes
+  settings.health.updateFrequency = 840000; //Every 24 minutes
   settings.firmware.updateFrequency = 3600000; //Every sixty minutes
   settings.sensors.updateFrequency = 2000; //Every two seconds
-  settings.minimumReportingDelta.voltage = 200; //200mv
-  settings.minimumReportingDelta.current = 512; //512mA
-  settings.minimumReportingDelta.temperature = 2; //2 degrees Celcius
-  settings.minimumReportingDelta.charge = 50; //50mAh
+  settings.minimumReportingDelta.voltage = 100; //100mv
+  settings.minimumReportingDelta.current = 100; //100mA
+  settings.minimumReportingDelta.temperature = 1; //1 degrees Celcius
+  settings.minimumReportingDelta.charge = 10; //10mAh
   settings.minimumReportingDelta.percentRemaining = 0; //Any Change
   settings.minimumReportingDelta.capacity = 1; //One mAh
   
