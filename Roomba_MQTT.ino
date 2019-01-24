@@ -304,25 +304,32 @@ void loop() {
       settings.health.lastRetrieved = millis();
     }
 
-    //Handle firmware updates if enough time has passed
-    if((unsigned long)(millis() - settings.firmware.lastRetrieved) > (unsigned long)settings.firmware.updateFrequency && roombaDataObserved.runStatus != CLEANING){
-      
-      broadcastLine("Checking firmware");
-
-      checkFirmwareUpgrade();
-
-      //Update the last handled time to be now
-      settings.firmware.lastRetrieved = millis();
-      
-    }
-
+    //Get sensor data if enough time has passed
     if((unsigned long)(millis() - settings.sensors.lastRetrieved) > settings.sensors.updateFrequency){
 
       //Get Roomba's data
       getRoombaData();
     
     }
-    
+
+    //Handle firmware updates if enough time has passed
+    if((unsigned long)(millis() - settings.firmware.lastRetrieved) > (unsigned long)settings.firmware.updateFrequency){
+
+      //Do not check for firmware while cleaning, but do update the timer so that the controller doesn't attempt to update firmware immediately after docking
+      if(roombaDataObserved.runStatus != CLEANING){
+        broadcastLine("Checking firmware.");
+  
+        checkFirmwareUpgrade();
+
+      }else{
+        broadcastLine("Ignoring firmware check because Roomba is cleaning.");
+      }
+
+      //Update the last handled time to be now
+      settings.firmware.lastRetrieved = millis();
+      
+    }
+
   }
 
 }
