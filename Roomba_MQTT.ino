@@ -184,7 +184,6 @@ void setup() {
   //Give the WiFi chip time to start
   delay(1000);
 
-  broadcastLine("\n");
   broadcastLine(padRight("", 23, ">") + " System Restarted " + padRight("", 23, "<"));
 
   //Get the MAC address
@@ -222,7 +221,7 @@ void setup() {
   }else{
 
     //The device is provisioned, get the settings from the EEPROM
-    broadcastLine("Device has been provisioned.\n");
+    broadcastLine("Device has been provisioned.");
 
     //Read the data from EEPROM
     readEEPROMToRAM();
@@ -241,7 +240,7 @@ void setup() {
     }
 
     //Connected, begin sending to the broadcastLin function
-    broadcastLine("IP address: " + WiFi.localIP().toString() + "\nMAC Address: " + WiFi.macAddress());
+    broadcastLine("IP address: " + WiFi.localIP().toString() + "\tMAC Address: " + WiFi.macAddress());
 
     //Start the telent server
     telnetServer.begin();
@@ -278,7 +277,7 @@ void loop() {
   
     if(tmpTelnetClient){
   
-      broadcastLine("A new telnet client connected.  Dropping any existing connections.\n");
+      broadcastLine("A new telnet client connected.  Dropping any existing connections.");
   
       //Copy the object over to the actual telnetClient, which will kill off any existing telnet clients
       telnetClient = tmpTelnetClient;
@@ -292,7 +291,7 @@ void loop() {
       if(settings.health.lastRetrieved > 0) {
         
         broadcastLine(padRight("", 64, "#"));
-        broadcastLine("Health Update\n");
+        broadcastLine("Health Update");
 
         //Time to send a health status update
         handleHealth();
@@ -413,12 +412,11 @@ void attemptProvision(String SSID, String wpaKey, String bootstrapURL){
     }
   }
 
-  broadcastLine("\n");
-  broadcastLine("IP address: " + WiFi.localIP().toString() + "\nMAC Address: " + WiFi.macAddress());
+  broadcastLine("IP address: " + WiFi.localIP().toString() + "\tMAC Address: " + WiFi.macAddress());
 
   //Attempt to retrieve the bootstrap
   if(retrieveBootstrap(bootstrapURL) == true){
-    broadcastLine("Retrieved configuration successfully.  Restarting.\n");
+    broadcastLine("Retrieved configuration successfully.  Restarting.");
 
     //Ensure the EEPROM has time to finish writing and closing the client
     delay(1000);
@@ -463,7 +461,7 @@ boolean retrieveBootstrap(String bootstrapURL){
     
   }else{
 
-    broadcastLine("Failed retrieving bootstrap from " + bootstrapURL + ": " + (String)httpClient.errorToString(httpClient.GET()) + ".\n");
+    broadcastLine("Failed retrieving bootstrap from " + bootstrapURL + ": " + (String)httpClient.errorToString(httpClient.GET()) + ".");
     
     return false;
   }
@@ -481,7 +479,7 @@ void reconnectMQTT() {
     // Attempt to connect
     if (mqttClient.connect(settings.machineMacAddress.c_str(), settings.mqttServer.username.c_str(), settings.mqttServer.password.c_str())) {
       
-      broadcastLine("connected.\n");
+      broadcastLine("connected.");
       
       // Publish an announcement on the client topic
       publishMQTT(settings.mqttServer.clientTopic + "/status", "Started");
@@ -499,7 +497,7 @@ void reconnectMQTT() {
     } else {
       
       broadcastLine("failed, rc=" + (String)mqttClient.state());
-      broadcastLine("Try again in 5 seconds.\n");
+      broadcastLine("Try again in 5 seconds.");
       
       // Wait 5 seconds before retrying
       delay(5000);
@@ -761,7 +759,7 @@ void readEEPROMToRAM(){
     JsonObject& root = jsonBuffer.parseObject(EEPROMRead(EEPROMDataBegin));
     
     if (!root.success()) {
-      broadcastLine("parseObject() failed\n");
+      broadcastLine("parseObject() failed");
       EEPROMWrite("false",0);
       return;
     }
@@ -1408,7 +1406,7 @@ void commandRoombaStop(){
   //Only allow Roomba to stop if it is currently cleaning
   if(roombaDataObserved.runStatus != CLEANING){
 
-    broadcastLine("Roomba is not cleaning; No need to Stop\n");
+    broadcastLine("Roomba is not cleaning; No need to Stop.");
     return;
   }
 
@@ -1548,14 +1546,14 @@ void commandRoombaReboot(){
   * Forces Roomba to reboot, essentially a battery remove/insert.  This resets the clock and schedules.
   */
 
-  broadcastLine("Rebooting Roomba.\n");
+  broadcastLine("Rebooting Roomba.");
   
   Serial1.write(128);
   delay(50);
   Serial1.write(7);
   delay(2000);
   
-  broadcastLine("Done.\n");
+  broadcastLine("Done.");
 
 }
 
@@ -1683,7 +1681,8 @@ void wwwHandleSubmit(){
     wpaKey.trim();
     bootstrapURL.trim();
       
-    broadcastLine("Attempting SSID " + SSID + " with WPA Key " + wpaKey + ".\nBootstrap URL: " + bootstrapURL);
+    broadcastLine("Attempting SSID " + SSID + " with WPA Key " + wpaKey + ".");
+    broadcastLine("Bootstrap URL: " + bootstrapURL);
     
     webServer.sendHeader("Connection", "close");
     webServer.sendHeader("Access-Control-Allow-Origin", "*");
@@ -1751,7 +1750,7 @@ void checkFirmwareUpgrade(){
     JsonObject& root = jsonBuffer.parseObject(jsonServerResponse);
     
     if (!root.success()) {
-      broadcastLine("Unable to parse firmware server response.\n");
+      broadcastLine("Unable to parse firmware server response.");
       broadcastLine(jsonServerResponse);
       return;
     }
@@ -1783,12 +1782,12 @@ void checkFirmwareUpgrade(){
           break;
 
         case HTTP_UPDATE_NO_UPDATES:
-          broadcastLine("HTTP_UPDATE_NO_UPDATES\n");
+          broadcastLine("HTTP_UPDATE_NO_UPDATES");
           break;
       }
     }
     else {
-      broadcastLine("Firmware is up-to-date.\n");
+      broadcastLine("Firmware is up-to-date.");
       publishMQTT(settings.mqttServer.clientTopic + "/firmware", (String)firmwareVersion);
     }
   }
