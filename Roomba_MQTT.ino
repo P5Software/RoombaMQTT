@@ -1344,20 +1344,32 @@ void observeEncoders(uint16_t leftEncoder, uint16_t rightEncoder){
 uint16_t computeEncoderDistance(uint16_t currentValue, uint16_t previousValue){
   /*
   * Determines the absolute distance traveled by the encoder, including passing over the minimum or maximum values.
+  * When moving backwards, the encoders will also roll backwards.
   */ 
   const uint16_t ceilingValue = 65535;
+  const uint16_t roombaSpeedLimit = 5000; //Roomba will never move this fast by half; Use this to determine if we crossed the ceiling or floor
   uint16_t returnValue = 0;
 
-  //Use the ceiling and determine if it was rolled over
-  if(previousValue + currentValue > ceilingValue){ 
 
-    //We rolled over the ceiling, so count from the previous value to the ceiling and also the current value
-    returnValue = (ceilingValue - previousValue) + currentValue;
-  }
-  else{
+  //Calculate the difference between the previous and current
+  if(abs(currentValue - previousValue) < roombaSpeedLimit){
+
+    //Use the difference between the two values
+    returnValue = abs(currentValue - previousValue);
     
-    //We did not roll over the ceiling, do a simple computation
-    returnValue = currentValue - previousValue;
+  }else{
+
+    //Determine if we crossed the ceiling or zero
+    if(currentValue < previousValue){
+      
+      //We crossed the ceiling going forward
+      returnValue = ceilingValue - previousValue + currentValue;
+    }
+    else{
+      
+      //We crossed zero going backward
+      returnValue = ceilingValue - currentValue + previousValue;
+    }
   }
 
   return returnValue;
