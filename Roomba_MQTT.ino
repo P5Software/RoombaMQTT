@@ -1329,7 +1329,7 @@ void observeEncoders(uint16_t leftEncoder, uint16_t rightEncoder){
   float distanceTraveled = averageDistance * ((float)pi * (float)wheelRadius / (float)wheelEncodersPerRevolution);
 
   //Broadcast the distance
-  broadcastLine("Distance traveled this iteration: " + (String)round(distanceTraveled));
+  broadcastLine("Distance traveled this iteration: " + (String)round(distanceTraveled) + "mm");
 
   //Add the distance traveled to the odometer
   roombaDataObserved.odometer = roombaDataObserved.odometer + round(distanceTraveled);
