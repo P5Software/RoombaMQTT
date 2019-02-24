@@ -1184,6 +1184,11 @@ void reportRoombaSensorChanges(){
 
     //Calculate the percent remaining
     roombaDataObserved.battery.percentRemaining = round(((float)roombaDataObserved.battery.charge/(float)roombaDataObserved.battery.capacity)*100);
+
+    //Only report if the value is between 0 and 100 otherwise make it 0
+    if((roombaDataObserved.battery.percentRemaining.toInt() < 0) && (roombaDataObserved.battery.percentRemaining.toInt() > 100)){
+      roombaDataObserved.battery.percentRemaining = '0';
+    }
     
     if(abs(roombaDataObserved.battery.percentRemaining.toInt() - roombaDataReported.battery.percentRemaining.toInt()) > settings.minimumReportingDelta.percentRemaining) {
 
