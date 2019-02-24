@@ -11,7 +11,7 @@
  *        firmwareUpdate (commands controller to check for a firmware update)
  *        bootstrap (commands controller to use an alternate bootstrap, erasing current EEPROM and replacing with the URL provided, requires "request" as payload)
  *        provisionReset (commands controller to erase EEPROM and wait for manual provisioning, requires "request" in payload)
- *        clean (commands Roomba to perform a normal cleaning routine or temporarily stops an existing cleaning in progress)
+ *        clean (commands Roomba to perform a normal cleaning routine or temporarily stops an existing cleaning in progress, for maximum clean, send payload of "maximum")
  *        stop (commands Roomba to shutdown and sleep immediately)
  *        dock (commands Roomba to seek the dock)
  *        setTime (commands Roomba to set its time in particular format)
@@ -626,8 +626,15 @@ void handleMQTTManagementMessage(String topic, String payload){
 
   //See if the payload requests roomba to start cleaning
   if(topic == settings.mqttServer.manageTopic + "/clean"){
-    commandRoombaClean();
 
+    bool maximum = false;
+    
+    if(payloadToLowerCase == "maximum"){
+      maximum == true;
+    }
+
+    commandRoombaClean(maximum);
+    
     return;
   }
 
@@ -1376,7 +1383,7 @@ uint16_t computeEncoderDistance(uint16_t currentValue, uint16_t previousValue){
 }
 
 
-void commandRoombaClean(){
+void commandRoombaClean(bool maximum){
 
   //Ensure Roomba is awake
   if(roombaDataObserved.runStatus == SLEEPING){
@@ -1392,7 +1399,14 @@ void commandRoombaClean(){
   delay(50);
   Serial1.write(131);
   delay(50);
-  Serial1.write(135);
+
+  //Determine if we are running to max
+  if(maximum == true){
+      Serial1.write(136);
+  }else{
+      //Normal cleaning
+      Serial1.write(135);
+  }
   delay(50);
 
 }
