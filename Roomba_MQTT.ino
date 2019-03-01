@@ -1414,12 +1414,16 @@ void commandRoombaClean(bool maximum){
 
   //Determine if we are running to max
   if(maximum == true){
+      broadcastLine("Commanding Roomba to Clean (Maximum)");
       Serial1.write(136);
   }else{
       //Normal cleaning
+      broadcastLine("Commanding Roomba to Clean (Normal)");
       Serial1.write(135);
   }
   delay(50);
+
+  broadcastLine(padRight("", 64, "]"));
 
 }
 
