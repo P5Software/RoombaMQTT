@@ -1395,9 +1395,16 @@ void commandRoombaClean(bool maximum){
     commandRoombaWake();
   }
 
+  if(roombaDataObserved.runStatus == CLEANING){
+    
+    broadcastLine(padRight("", 64, "["));
+    broadcastLine("Roomba is already cleaning, ignoring request to clean.");
+    broadcastLine(padRight("", 64, "]"));
+
+    return;
+  }
+
   broadcastLine(padRight("", 64, "["));
-  broadcastLine("Commanding Roomba to Clean");
-  broadcastLine(padRight("", 64, "]"));
 
   //Send the command to Roomba
   Serial1.write(128);
